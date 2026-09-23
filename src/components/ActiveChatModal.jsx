@@ -131,12 +131,16 @@ export default function ActiveChatModal({ session, onClose }) {
           const normalizedMsg = {
             _id: msg._id || msg.id || "msg_" + Date.now(),
             id: msg._id || msg.id || "msg_" + Date.now(),
+            clientMessageId: msg.clientMessageId || msg.tempId || msg.clientMsgId || null,
             sessionId: msg.sessionId || msg.chatId || sessionId,
             senderId: msg.senderId || msg.sender,
             senderType: (msg.senderType || msg.role || "user").toUpperCase(),
+            messageType: msg.messageType || "text",
             text: msg.text || msg.message || msg.content || "",
             message: msg.text || msg.message || msg.content || "",
             content: msg.text || msg.message || msg.content || "",
+            mediaUrl: msg.mediaUrl || msg.image || null,
+            image: msg.mediaUrl || msg.image || null,
             createdAt: msg.createdAt || new Date().toISOString(),
             timestamp: msg.timestamp || (msg.createdAt ? new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
           };
@@ -145,9 +149,20 @@ export default function ActiveChatModal({ session, onClose }) {
             try {
               if (!Array.isArray(prev)) return [normalizedMsg];
               const msgId = String(normalizedMsg._id || normalizedMsg.id || "");
+              const clientMsgId = String(normalizedMsg.clientMessageId || "");
 
-              // Deduplicate by server _id only — same text with a different _id is a separate message
+              // Skip if exact server _id already exists
               if (msgId && prev.some((m) => m && String(m._id || m.id || "") === msgId)) return prev;
+
+              // Reconcile optimistic temp message if clientMessageId matches
+              if (clientMsgId) {
+                const matchIdx = prev.findIndex((m) => m && String(m.clientMessageId || m.id || "") === clientMsgId);
+                if (matchIdx !== -1) {
+                  const updated = [...prev];
+                  updated[matchIdx] = normalizedMsg;
+                  return updated;
+                }
+              }
 
               return [...prev, normalizedMsg];
             } catch (e) {
@@ -199,10 +214,19 @@ export default function ActiveChatModal({ session, onClose }) {
                   for (const m of existingMsgs) {
                     if (!m) continue;
                     const mId = String(m._id || m.id || "");
+                    const clientMId = String(m.clientMessageId || "");
 
-                    // Skip only if the exact same server _id already exists — never compare text
                     const existsById = mId && updated.some((p) => String(p._id || p.id || "") === mId);
                     if (existsById) continue;
+
+                    if (clientMId) {
+                      const matchIdx = updated.findIndex((p) => String(p.clientMessageId || p.id || "") === clientMId);
+                      if (matchIdx !== -1) {
+                        updated[matchIdx] = m;
+                        hasChanges = true;
+                        continue;
+                      }
+                    }
 
                     updated.push(m);
                     hasChanges = true;
@@ -276,8 +300,11 @@ export default function ActiveChatModal({ session, onClose }) {
     if (!inputMessage.trim()) return;
 
     const text = inputMessage.trim();
+    const clientMessageId = "msg_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9);
+
     const newMsg = {
-      id: "msg_" + Date.now(),
+      id: clientMessageId,
+      clientMessageId,
       sessionId,
       chatId: sessionId,
       roomId: sessionId,
@@ -311,7 +338,7 @@ export default function ActiveChatModal({ session, onClose }) {
     try {
       const s = connectSocket();
       if (!s || !s.connected) {
-        sendChatMessageApi(sessionId, text, targetUserId, astroId);
+        sendChatMessageApi(sessionId, text, targetUserId, astroId, clientMessageId);
       }
     } catch {
       // ignore

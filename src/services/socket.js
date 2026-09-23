@@ -31,10 +31,12 @@ export const playNotificationSound = () => {
  * Normalizes user details safely from any backend payload structure
  */
 export const extractUserData = (data) => {
-  if (!data) return { name: "User Client" };
+  if (!data) return { name: "Client User" };
 
-  // If user object is nested or populated
-  const userObj = (typeof data.user === "object" && data.user)
+  // Handle nested session or response objects
+  const sessionObj = data.session || data.data || data;
+  const userObj = (typeof sessionObj.user === "object" && sessionObj.user)
+    || (typeof data.user === "object" && data.user)
     || (typeof data.userId === "object" && data.userId)
     || (typeof data.client === "object" && data.client)
     || (typeof data.userData === "object" && data.userData)
@@ -62,18 +64,11 @@ export const extractUserData = (data) => {
     data.clientName ||
     data.senderName;
 
-  const userIdStr = typeof data.userId === "string" ? data.userId : typeof data.user === "string" ? data.user : "";
+  const userIdStr = typeof userObj._id === "string" ? userObj._id : typeof data.userId === "string" ? data.userId : typeof data.user === "string" ? data.user : "";
+  const phone = userObj.phone || data.phone || "";
 
-  let savedName = "";
-  try {
-    const userLocal = JSON.parse(localStorage.getItem("user") || "{}");
-    if (userLocal.name || userLocal.firstname) {
-      savedName = userLocal.name || `${userLocal.firstname || ""} ${userLocal.lastname || ""}`.trim();
-    }
-  } catch {}
-
-  const fallbackName = savedName || (userIdStr ? `User #${userIdStr.slice(-4)}` : "Client User");
-  const name = rawName && typeof rawName === "string" && rawName.trim() ? rawName.trim() : fallbackName;
+  const fallbackName = phone ? `User (${phone})` : (userIdStr ? `User #${String(userIdStr).slice(-4)}` : "Client User");
+  const name = rawName && typeof rawName === "string" && rawName.trim() && rawName.trim() !== "Client User" ? rawName.trim() : fallbackName;
 
   const avatar =
     userObj.profileImage ||
