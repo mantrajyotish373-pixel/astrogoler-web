@@ -559,7 +559,6 @@ export const sendChatMessage = (messageData) => {
     };
 
     s.emit("send_message", specPayload);
-    s.emit("send_chat_message", specPayload);
   }
 };
 

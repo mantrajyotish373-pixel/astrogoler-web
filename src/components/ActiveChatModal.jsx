@@ -145,25 +145,9 @@ export default function ActiveChatModal({ session, onClose }) {
             try {
               if (!Array.isArray(prev)) return [normalizedMsg];
               const msgId = String(normalizedMsg._id || normalizedMsg.id || "");
-              const msgText = (normalizedMsg.text || "").toString().trim();
-              const normSender = (normalizedMsg.senderType || "").toUpperCase();
 
-              // 1. Avoid duplicate by ID
+              // Deduplicate by server _id only — same text with a different _id is a separate message
               if (msgId && prev.some((m) => m && String(m._id || m.id || "") === msgId)) return prev;
-
-              // 2. Deduplicate by matching senderType & exact text
-              const matchIndex = prev.findIndex(
-                (m) =>
-                  m &&
-                  String(m.senderType || m.role || "").toUpperCase() === normSender &&
-                  (m.text || m.message || "").toString().trim() === msgText
-              );
-
-              if (matchIndex !== -1) {
-                const updated = [...prev];
-                updated[matchIndex] = normalizedMsg;
-                return updated;
-              }
 
               return [...prev, normalizedMsg];
             } catch (e) {
@@ -215,25 +199,13 @@ export default function ActiveChatModal({ session, onClose }) {
                   for (const m of existingMsgs) {
                     if (!m) continue;
                     const mId = String(m._id || m.id || "");
-                    const mText = (m.text || m.message || "").toString().trim();
-                    const mSender = String(m.senderType || "").toUpperCase();
 
-                    const existsById = updated.some((p) => String(p._id || p.id || "") === mId);
+                    // Skip only if the exact same server _id already exists — never compare text
+                    const existsById = mId && updated.some((p) => String(p._id || p.id || "") === mId);
                     if (existsById) continue;
 
-                    const matchIdx = updated.findIndex(
-                      (p) =>
-                        String(p.senderType || p.role || "").toUpperCase() === mSender &&
-                        (p.text || p.message || "").toString().trim() === mText
-                    );
-
-                    if (matchIdx !== -1) {
-                      updated[matchIdx] = m;
-                      hasChanges = true;
-                    } else {
-                      updated.push(m);
-                      hasChanges = true;
-                    }
+                    updated.push(m);
+                    hasChanges = true;
                   }
 
                   return hasChanges ? updated : prev;
@@ -595,9 +567,12 @@ export default function ActiveChatModal({ session, onClose }) {
           className="flex-1 overflow-y-auto p-4 flex flex-col gap-3.5 bg-gradient-to-b from-gray-50/50 to-gray-100/30 relative"
         >
           {messages.map((msg, i) => {
+            // Use server _id as the React key; fall back to array index only for system/local-only messages
+            const msgKey = msg._id || msg.id || i;
+
             if (msg.senderType === "SYSTEM") {
               return (
-                <div key={i} className="self-center my-2 bg-gray-200/50 text-gray-500 text-[10px] uppercase tracking-wider font-extrabold px-4 py-1.5 rounded-full text-center max-w-[85%] border border-gray-200/20 shadow-sm">
+                <div key={msgKey} className="self-center my-2 bg-gray-200/50 text-gray-500 text-[10px] uppercase tracking-wider font-extrabold px-4 py-1.5 rounded-full text-center max-w-[85%] border border-gray-200/20 shadow-sm">
                   {msg.text}
                 </div>
               );
@@ -608,7 +583,7 @@ export default function ActiveChatModal({ session, onClose }) {
 
             return (
               <div
-                key={i}
+                key={msgKey}
                 className={`flex flex-col max-w-[78%] ${isMe ? "self-end items-end" : "self-start items-start"}`}
               >
                 <div
