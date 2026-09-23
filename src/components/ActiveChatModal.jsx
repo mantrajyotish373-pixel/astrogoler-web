@@ -40,29 +40,40 @@ export default function ActiveChatModal({ session, onClose }) {
 
   const startTimeMsRef = useRef(null);
   const clockOffsetRef = useRef(0);
-
-  const syncServerTime = (startTimeVal, serverNowVal) => {
-    if (startTimeVal) {
-      const parsedStart = new Date(startTimeVal).getTime();
-      if (!isNaN(parsedStart)) {
-        startTimeMsRef.current = parsedStart;
-      }
-    }
-    if (serverNowVal) {
-      const parsedServerNow = new Date(serverNowVal).getTime();
-      if (!isNaN(parsedServerNow)) {
-        const clientReceiveMs = Date.now();
-        clockOffsetRef.current = clientReceiveMs - parsedServerNow;
-      }
-    }
-    recalculateElapsed();
-  };
+  const lastServerTickMsRef = useRef(0);
 
   const recalculateElapsed = () => {
     if (!startTimeMsRef.current) return;
     const estimatedServerNow = Date.now() - clockOffsetRef.current;
     const computedSecs = Math.max(0, Math.floor((estimatedServerNow - startTimeMsRef.current) / 1000));
-    setSecondsElapsed((prev) => Math.max(prev, computedSecs));
+    setSecondsElapsed(computedSecs);
+  };
+
+  const syncServerTime = (startTimeVal, serverNowVal) => {
+    const now = Date.now();
+    let isServerSyncValid = true;
+
+    if (serverNowVal) {
+      const parsedServerNow = typeof serverNowVal === 'number' ? serverNowVal : new Date(serverNowVal).getTime();
+      if (!isNaN(parsedServerNow)) {
+        if (parsedServerNow >= lastServerTickMsRef.current) {
+          lastServerTickMsRef.current = parsedServerNow;
+          clockOffsetRef.current = now - parsedServerNow;
+        } else {
+          isServerSyncValid = false;
+        }
+      }
+    }
+
+    if (isServerSyncValid) {
+      if (startTimeVal) {
+        const parsedStart = typeof startTimeVal === 'number' ? startTimeVal : new Date(startTimeVal).getTime();
+        if (!isNaN(parsedStart)) {
+          startTimeMsRef.current = parsedStart;
+        }
+      }
+      recalculateElapsed();
+    }
   };
 
   const currentEarningsRef = useRef(0);
@@ -203,11 +214,6 @@ export default function ActiveChatModal({ session, onClose }) {
         unsubTimer = subscribeSocketEvent("timerTick", (data) => {
           if (data?.startTime || data?.serverNow) {
             syncServerTime(data.startTime, data.serverNow);
-          }
-          if (data?.elapsedSeconds !== undefined) {
-            setSecondsElapsed((prev) => Math.max(prev, data.elapsedSeconds));
-          } else if (data?.elapsedMinutes !== undefined) {
-            setSecondsElapsed((prev) => Math.max(prev, data.elapsedMinutes * 60));
           }
         });
 
