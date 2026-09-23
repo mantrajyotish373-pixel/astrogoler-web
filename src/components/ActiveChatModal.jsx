@@ -38,6 +38,33 @@ export default function ActiveChatModal({ session, onClose }) {
   const secondsElapsedRef = useRef(0);
   secondsElapsedRef.current = secondsElapsed;
 
+  const startTimeMsRef = useRef(null);
+  const clockOffsetRef = useRef(0);
+
+  const syncServerTime = (startTimeVal, serverNowVal) => {
+    if (startTimeVal) {
+      const parsedStart = new Date(startTimeVal).getTime();
+      if (!isNaN(parsedStart)) {
+        startTimeMsRef.current = parsedStart;
+      }
+    }
+    if (serverNowVal) {
+      const parsedServerNow = new Date(serverNowVal).getTime();
+      if (!isNaN(parsedServerNow)) {
+        const clientReceiveMs = Date.now();
+        clockOffsetRef.current = clientReceiveMs - parsedServerNow;
+      }
+    }
+    recalculateElapsed();
+  };
+
+  const recalculateElapsed = () => {
+    if (!startTimeMsRef.current) return;
+    const estimatedServerNow = Date.now() - clockOffsetRef.current;
+    const computedSecs = Math.max(0, Math.floor((estimatedServerNow - startTimeMsRef.current) / 1000));
+    setSecondsElapsed((prev) => Math.max(prev, computedSecs));
+  };
+
   const currentEarningsRef = useRef(0);
 
   // Auto-scroll to bottom
@@ -84,6 +111,12 @@ export default function ActiveChatModal({ session, onClose }) {
     let unsubWarning = () => {};
     let unsubEnded = () => {};
 
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        recalculateElapsed();
+      }
+    };
+
     if (sessionId) {
       // 1. Load initial chat messages if any
       fetchChatMessagesApi(sessionId).then((existingMsgs) => {
@@ -107,21 +140,16 @@ export default function ActiveChatModal({ session, onClose }) {
         joinChatRoom(sessionId);
         acceptChatRequest(sessionId);
 
-        // Start local duration counter with correct offset
-        let initialSeconds = 0;
-        const sessionStart = session?.startTime || session?.createdAt;
-        if (sessionStart) {
-          const start = new Date(sessionStart).getTime();
-          const now = Date.now();
-          if (!isNaN(start) && now > start) {
-            initialSeconds = Math.floor((now - start) / 1000);
-          }
-        }
-        setSecondsElapsed(initialSeconds);
+        // Sync initial session server time
+        syncServerTime(session?.startTime || session?.createdAt, session?.serverNow);
 
+        // Timestamp-delta local interval
         timer = setInterval(() => {
-          setSecondsElapsed((prev) => prev + 1);
+          recalculateElapsed();
         }, 1000);
+
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        window.addEventListener('focus', recalculateElapsed);
 
         // Subscribe to Socket events
         unsubMsg = subscribeSocketEvent("receiveMessage", (msg) => {
@@ -173,10 +201,13 @@ export default function ActiveChatModal({ session, onClose }) {
         });
 
         unsubTimer = subscribeSocketEvent("timerTick", (data) => {
+          if (data?.startTime || data?.serverNow) {
+            syncServerTime(data.startTime, data.serverNow);
+          }
           if (data?.elapsedSeconds !== undefined) {
-            setSecondsElapsed(data.elapsedSeconds);
+            setSecondsElapsed((prev) => Math.max(prev, data.elapsedSeconds));
           } else if (data?.elapsedMinutes !== undefined) {
-            setSecondsElapsed(data.elapsedMinutes * 60);
+            setSecondsElapsed((prev) => Math.max(prev, data.elapsedMinutes * 60));
           }
         });
 
@@ -255,6 +286,11 @@ export default function ActiveChatModal({ session, onClose }) {
                   const data = await res.json().catch(() => null);
                   const status = data?.status || data?.session?.status || data?.data?.status;
                   const isActive = data?.isActive ?? data?.session?.isActive;
+                  const sObj = data?.session || data?.data || data;
+
+                  if (sObj?.startTime || data?.serverNow || sObj?.serverNow) {
+                    syncServerTime(sObj?.startTime, data?.serverNow || sObj?.serverNow);
+                  }
 
                   if (status === "COMPLETED" || status === "ENDED" || status === "REJECTED" || status === "CLOSED" || isActive === false) {
                     console.log("🔴 Session status marked ended on backend - Closing modal immediately");
@@ -284,6 +320,8 @@ export default function ActiveChatModal({ session, onClose }) {
     return () => {
       if (timer) clearInterval(timer);
       if (statusChecker) clearInterval(statusChecker);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', recalculateElapsed);
       if (!isReadOnly) {
         unsubMsg();
         unsubTimer();
