@@ -1,6 +1,4 @@
-import api from "./axiosInstance";
-
-export const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL || "http://45.196.196.238:3001").replace(/\/$/, "");
+export const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL || (typeof window !== "undefined" ? window.location.origin : "https://astro.mantrajyotish.com")).replace(/\/$/, "");
 
 export const API_BASE_URL = `${BACKEND_URL}/api/astrologer`;
 export const UPLOAD_IMAGE_URL = `${BACKEND_URL}/api/upload/image`;
