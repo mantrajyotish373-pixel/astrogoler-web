@@ -1078,8 +1078,8 @@ export default function Dashboard({ onLogout, initialOpenWithdraw = false }) {
     });
 
     const unsubEndedGlobal = subscribeSocketEvent("chatEnded", (data) => {
-      console.log("🔴 Global chatEnded event on Dashboard - clearing active session:", data);
-      setActiveChatSession(null);
+      console.log("🔴 Global chatEnded event on Dashboard:", data);
+
       // ✅ Auto-close the incoming chat request overlay if cancelled
       let wasIncomingActive = false;
       setIncomingRequest(prev => {
@@ -1106,7 +1106,6 @@ export default function Dashboard({ onLogout, initialOpenWithdraw = false }) {
 
     const unsubCallEnded = subscribeSocketEvent("callEnded", (data) => {
       console.log("🔴 Call ended on Dashboard - clearing active call:", data);
-      setActiveCallSession(null);
       // ✅ Auto-close the incoming call request overlay if cancelled
       let wasIncomingActive = false;
       setIncomingCallRequest(prev => {
@@ -1350,15 +1349,15 @@ export default function Dashboard({ onLogout, initialOpenWithdraw = false }) {
               <div className="border-t border-gray-250 pt-3.5 space-y-2">
                 <div className="flex justify-between items-center text-xs">
                   <span className="text-gray-500 font-medium">Total Charges (Gross)</span>
-                  <span className="font-bold text-gray-700">₹{summaryData.totalDeducted || (Number(summaryData.earnings) / 0.60).toFixed(2)}</span>
+                  <span className="font-bold text-gray-700">₹{Number(summaryData.totalDeducted || 0).toFixed(2)}</span>
                 </div>
                 <div className="flex justify-between items-center text-xs">
                   <span className="text-gray-500 font-medium">Platform Share (40%)</span>
-                  <span className="font-bold text-red-500">-₹{summaryData.platformFee || ((Number(summaryData.earnings) / 0.60) * 0.40).toFixed(2)}</span>
+                  <span className="font-bold text-red-500">-₹{Number(summaryData.platformFee || 0).toFixed(2)}</span>
                 </div>
                 <div className="border-t border-dashed border-gray-250 pt-2.5 flex justify-between items-center text-sm font-extrabold text-gray-900">
                   <span>Your Earnings (60%)</span>
-                  <span className="text-emerald-600 text-lg">₹{summaryData.earnings}</span>
+                  <span className="text-emerald-600 text-lg">₹{Number(summaryData.earnings || 0).toFixed(2)}</span>
                 </div>
               </div>
             </div>

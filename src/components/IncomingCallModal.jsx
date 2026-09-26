@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Check, X, Clock, Calendar, MapPin, User, Sparkles, Phone, Video, Mic, ShieldAlert } from "lucide-react";
 import { acceptCallApi, rejectCallApi } from "../config/api";
 import { acceptCallRequest, rejectCallRequest } from "../services/socket";
+import { startIncomingRingtone, stopRingtone, playConnectionChime } from "../services/sound";
 
 export default function IncomingCallModal({ request, onAccept, onDecline }) {
   const [timeLeft, setTimeLeft] = useState(30);
@@ -57,19 +58,24 @@ export default function IncomingCallModal({ request, onAccept, onDecline }) {
         setErrorAlert(res.message || "This call has been cancelled by the user.");
         return;
       }
-      const agoraData = res?.data?.agora || res?.agora || {};
+      const rtcData = res?.data?.rtc || res?.rtc || res?.data?.agora || res?.agora || {};
       const sessionData = res?.data?.session || res?.session || {};
       // 2. Only emit accept event if successful
       if (callId) {
         acceptCallRequest(callId, callType);
+        playConnectionChime();
       }
       const merged = {
         ...request,
         ...sessionData,
-        agora: agoraData,
-        rtcToken: agoraData.token || request.rtcToken || "",
-        appId: agoraData.appId || request.appId || "",
-        channelName: agoraData.channelName || sessionData.channelName || request.channelName || ""
+        rtc: rtcData,
+        agora: rtcData,
+        uid: rtcData.uid !== undefined ? Number(rtcData.uid) : (sessionData.astrologerUid ? Number(sessionData.astrologerUid) : undefined),
+        astrologerUid: rtcData.uid !== undefined ? Number(rtcData.uid) : (sessionData.astrologerUid ? Number(sessionData.astrologerUid) : undefined),
+        userUid: sessionData.userUid,
+        rtcToken: rtcData.token || request.rtcToken || "",
+        appId: rtcData.appId || request.appId || "",
+        channelName: rtcData.channelName || sessionData.channelName || request.channelName || ""
       };
       onAccept(merged);
     } catch (err) {

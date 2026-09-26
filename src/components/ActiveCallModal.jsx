@@ -62,11 +62,11 @@ export default function ActiveCallModal({ session, onClose }) {
   const pob = user?.pob || user?.placeofbirth || "Not Specified";
 
   // Extract Agora Token Details from backend response payload
-  const agoraObj = session?.agora || session?.data?.agora || {};
-  const appId = agoraObj.appId || session?.appId || import.meta.env.VITE_AGORA_APP_ID || "af89ac0f87f4412ea75f23aba4717e04";
-  const channelName = agoraObj.channelName || session?.channelName || session?.roomId || `video_${callId}`;
-  const token = agoraObj.token || session?.rtcToken || session?.token || null;
-  const uid = agoraObj.uid ?? 0;
+  const rtcObj = session?.rtc || session?.agora || session?.data?.rtc || session?.data?.agora || {};
+  const appId = rtcObj.appId || session?.appId || import.meta.env.VITE_AGORA_APP_ID || "af89ac0f87f4412ea75f23aba4717e04";
+  const channelName = session?.channelName || rtcObj.channelName || session?.roomId || `video_${callId}`;
+  const token = rtcObj.token || session?.rtcToken || session?.token || null;
+  const uid = rtcObj.uid !== undefined ? Number(rtcObj.uid) : (session?.astrologerUid ? Number(session.astrologerUid) : (session?.uid ? Number(session.uid) : null));
 
   // Format DOB Date format safely (e.g. YYYY-MM-DD -> DD/MM/YYYY)
   const formatDob = (dateVal) => {
@@ -186,7 +186,12 @@ export default function ActiveCallModal({ session, onClose }) {
     // Socket subscriptions
     const unsubEnded = subscribeSocketEvent("callEnded", (data) => {
       console.log("🔴 Call ended via socket event:", data);
-      handleEndCall();
+      handleEndCall(data);
+    });
+
+    const unsubSessionEnded = subscribeSocketEvent("session_ended", (data) => {
+      console.log("🔴 Session ended via socket event:", data);
+      handleEndCall(data);
     });
 
     const unsubTimerTick = subscribeSocketEvent("timerTick", (data) => {
@@ -426,18 +431,26 @@ export default function ActiveCallModal({ session, onClose }) {
     }
   };
 
-  const handleEndCall = async () => {
+  const handleEndCall = async (endData = null) => {
     let summary = null;
     try {
       if (callId) {
         endCallSession(callId);
       }
-      const res = await endCallApi(callId);
+      const res = await endCallApi(callId).catch(() => null);
       
-      const finalGross = Number(res?.data?.totalAmountDeducted || res?.totalAmountDeducted || currentEarningsRef.current).toFixed(2);
-      const finalPlatFee = Number(res?.data?.platformFee || res?.platformFee || (Number(currentEarningsRef.current) * 0.40)).toFixed(2);
-      const finalEarning = Number(res?.data?.astrologerEarnings || res?.astrologerEarnings || (Number(currentEarningsRef.current) * 0.60)).toFixed(2);
-      const finalSecs = res?.data?.totalDurationSeconds || res?.totalDurationSeconds || durationRef.current;
+      const sObj = res?.data || res?.session || endData?.session || endData?.data || endData || {};
+      const rawSecs = Number(sObj.totalDurationSeconds || sObj.durationSeconds || endData?.totalDurationSeconds || 0);
+      const finalSecs = rawSecs > 0 ? rawSecs : (durationRef.current || duration || 1);
+      const calculatedGross = (Math.max(1, finalSecs) * (perMinuteRate / 60)).toFixed(2);
+      const rawGross = (sObj.totalAmountDeducted !== undefined && Number(sObj.totalAmountDeducted) > 0)
+        ? Number(sObj.totalAmountDeducted)
+        : (endData?.totalAmountDeducted !== undefined && Number(endData.totalAmountDeducted) > 0)
+        ? Number(endData.totalAmountDeducted)
+        : Number(calculatedGross);
+      const finalGross = rawGross.toFixed(2);
+      const finalPlatFee = (rawGross * 0.40).toFixed(2);
+      const finalEarning = (rawGross * 0.60).toFixed(2);
       
       summary = {
         clientName: clientName,
@@ -449,33 +462,40 @@ export default function ActiveCallModal({ session, onClose }) {
       };
     } catch (err) {
       console.error("Error ending call:", err);
+      const finalSecs = durationRef.current || duration || 1;
+      const calculatedGross = (Math.max(1, finalSecs) * (perMinuteRate / 60)).toFixed(2);
+      const rawGross = Number(calculatedGross);
       summary = {
         clientName: clientName,
         type: isVideoCall ? "Video Call" : "Audio Call",
-        duration: formatTimer(durationRef.current),
-        totalDeducted: Number(currentEarningsRef.current).toFixed(2),
-        platformFee: (Number(currentEarningsRef.current) * 0.40).toFixed(2),
-        earnings: (Number(currentEarningsRef.current) * 0.60).toFixed(2)
+        duration: formatTimer(finalSecs),
+        totalDeducted: rawGross.toFixed(2),
+        platformFee: (rawGross * 0.40).toFixed(2),
+        earnings: (rawGross * 0.60).toFixed(2)
       };
     } finally {
       leaveAgoraCallChannel();
-      onClose(summary);
+      if (onClose) {
+        onClose(summary);
+      }
     }
   };
 
   const formatTimer = (totalSeconds) => {
-    const hrs = Math.floor(totalSeconds / 3600);
-    const mins = Math.floor((totalSeconds % 3600) / 60);
-    const secs = totalSeconds % 60;
+    const s = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+    const hrs = Math.floor(s / 3600);
+    const mins = Math.floor((s % 3600) / 60);
+    const secs = s % 60;
     if (hrs > 0) {
       return `${hrs.toString().padStart(2, "0")}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
     }
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   };
 
-  // Compute live synchronized earnings directly from the elapsed duration
-  const elapsedMinutes = Math.max(1, Math.ceil(duration / 60));
-  const currentEarnings = (elapsedMinutes * perMinuteRate).toFixed(2);
+  // Compute exact pro-rata live earnings directly from the elapsed duration in seconds
+  const ratePerSecond = perMinuteRate / 60;
+  const currentExactGross = parseFloat((Math.max(1, duration) * ratePerSecond).toFixed(2));
+  const currentEarnings = currentExactGross.toFixed(2);
   currentEarningsRef.current = currentEarnings;
 
   return (

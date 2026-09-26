@@ -120,6 +120,7 @@ export default function ActiveChatModal({ session, onClose }) {
     let unsubMsg = () => {};
     let unsubTimer = () => {};
     let unsubWarning = () => {};
+    let unsubUserTyping = () => {};
     let unsubEnded = () => {};
 
     const handleVisibilityChange = () => {
@@ -163,6 +164,15 @@ export default function ActiveChatModal({ session, onClose }) {
         window.addEventListener('focus', recalculateElapsed);
 
         // Subscribe to Socket events
+        unsubUserTyping = subscribeSocketEvent("userTyping", (data) => {
+          if (!data) return;
+          const senderType = String(data.senderType || data.role || "").toUpperCase();
+          if (senderType === "USER" || senderType === "CLIENT") {
+            setIsUserTyping(Boolean(data.isTyping));
+          }
+        });
+
+        // Subscribe to Socket events
         unsubMsg = subscribeSocketEvent("receiveMessage", (msg) => {
           if (!msg) return;
           console.log("📩 New Message Received in Active Chat:", msg);
@@ -190,12 +200,30 @@ export default function ActiveChatModal({ session, onClose }) {
               const msgId = String(normalizedMsg._id || normalizedMsg.id || "");
               const clientMsgId = String(normalizedMsg.clientMessageId || "");
 
-              // Skip if exact server _id already exists
-              if (msgId && prev.some((m) => m && String(m._id || m.id || "") === msgId)) return prev;
+              // 1. Skip if exact server _id already exists
+              if (msgId && prev.some((m) => m && (String(m._id || "") === msgId || String(m.id || "") === msgId))) {
+                return prev;
+              }
 
-              // Reconcile optimistic temp message if clientMessageId matches
+              // 2. Reconcile optimistic temp message if clientMessageId matches
               if (clientMsgId) {
-                const matchIdx = prev.findIndex((m) => m && String(m.clientMessageId || m.id || "") === clientMsgId);
+                const matchIdx = prev.findIndex((m) => m && (String(m.clientMessageId || "") === clientMsgId || String(m.id || "") === clientMsgId));
+                if (matchIdx !== -1) {
+                  const updated = [...prev];
+                  updated[matchIdx] = normalizedMsg;
+                  return updated;
+                }
+              }
+
+              // 3. Reconcile optimistic astrologer message by text matching if temp id
+              const isAstro = (normalizedMsg.senderType || "").toUpperCase() === "ASTROLOGER";
+              if (isAstro) {
+                const matchIdx = prev.findIndex(
+                  (m) => m &&
+                    String(m.id || "").startsWith("msg_") &&
+                    ((m.senderType || "").toUpperCase() === "ASTROLOGER" || (m.role || "").toUpperCase() === "ASTROLOGER") &&
+                    String(m.text || m.message || "").trim() === String(normalizedMsg.text || normalizedMsg.message || "").trim()
+                );
                 if (matchIdx !== -1) {
                   const updated = [...prev];
                   updated[matchIdx] = normalizedMsg;
@@ -223,10 +251,18 @@ export default function ActiveChatModal({ session, onClose }) {
 
         unsubEnded = subscribeSocketEvent("chatEnded", (data) => {
           console.log("🔴 Chat Session Ended Event Received - Closing modal immediately:", data);
-          const finalGross = Number(data?.session?.totalAmountDeducted || data?.totalAmountDeducted || currentEarningsRef.current).toFixed(2);
-          const finalPlatFee = Number(data?.session?.platformFee || data?.platformFee || (Number(currentEarningsRef.current) * 0.40)).toFixed(2);
-          const finalEarning = Number(data?.session?.astrologerEarnings || data?.astrologerEarnings || (Number(currentEarningsRef.current) * 0.60)).toFixed(2);
-          const finalSecs = data?.session?.totalDurationSeconds || data?.totalDurationSeconds || secondsElapsedRef.current;
+          const sObj = data?.session || data?.data || data || {};
+          const rawSecs = Number(sObj.totalDurationSeconds || sObj.durationSeconds || data?.totalDurationSeconds || 0);
+          const finalSecs = rawSecs > 0 ? rawSecs : (secondsElapsedRef.current || secondsElapsed || 1);
+          const calculatedGross = (Math.max(1, finalSecs) * (perMinuteRate / 60)).toFixed(2);
+          const rawGross = (sObj.totalAmountDeducted !== undefined && Number(sObj.totalAmountDeducted) > 0)
+            ? Number(sObj.totalAmountDeducted)
+            : (data?.totalAmountDeducted !== undefined && Number(data.totalAmountDeducted) > 0)
+            ? Number(data.totalAmountDeducted)
+            : Number(calculatedGross);
+          const finalGross = rawGross.toFixed(2);
+          const finalPlatFee = (rawGross * 0.40).toFixed(2);
+          const finalEarning = (rawGross * 0.60).toFixed(2);
           onClose({
             clientName: user?.name || "Client User",
             type: "Chat",
@@ -299,8 +335,26 @@ export default function ActiveChatModal({ session, onClose }) {
                   }
 
                   if (status === "COMPLETED" || status === "ENDED" || status === "REJECTED" || status === "CLOSED" || isActive === false) {
-                    console.log("🔴 Session status marked ended on backend - Closing modal immediately");
-                    onClose();
+                    console.log("🔴 Session status marked ended on backend - Closing modal with summary");
+                    const rawSecs = Number(sObj?.totalDurationSeconds || sObj?.durationSeconds || data?.totalDurationSeconds || 0);
+                    const finalSecs = rawSecs > 0 ? rawSecs : (secondsElapsedRef.current || secondsElapsed || 1);
+                    const calculatedGross = (Math.max(1, finalSecs) * (perMinuteRate / 60)).toFixed(2);
+                    const rawGross = (sObj?.totalAmountDeducted !== undefined && Number(sObj.totalAmountDeducted) > 0)
+                      ? Number(sObj.totalAmountDeducted)
+                      : (data?.totalAmountDeducted !== undefined && Number(data.totalAmountDeducted) > 0)
+                      ? Number(data.totalAmountDeducted)
+                      : Number(calculatedGross);
+                    const finalGross = rawGross.toFixed(2);
+                    const finalPlatFee = (rawGross * 0.40).toFixed(2);
+                    const finalEarning = (rawGross * 0.60).toFixed(2);
+                    onClose({
+                      clientName: user?.name || "Client User",
+                      type: "Chat",
+                      duration: formatTimer(finalSecs),
+                      totalDeducted: finalGross,
+                      platformFee: finalPlatFee,
+                      earnings: finalEarning
+                    });
                     break;
                   }
                 }
@@ -332,6 +386,7 @@ export default function ActiveChatModal({ session, onClose }) {
         unsubMsg();
         unsubTimer();
         unsubWarning();
+        unsubUserTyping();
         unsubEnded();
       }
     };
@@ -394,9 +449,17 @@ export default function ActiveChatModal({ session, onClose }) {
 
 
 
+  const typingTimerRef = useRef(null);
   const handleInputChange = (e) => {
-    setInputMessage(e.target.value);
-    emitTyping(sessionId, e.target.value.length > 0);
+    const val = e.target.value;
+    setInputMessage(val);
+    emitTyping(sessionId, val.length > 0);
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    if (val.length > 0) {
+      typingTimerRef.current = setTimeout(() => {
+        emitTyping(sessionId, false);
+      }, 3500);
+    }
   };
 
   const handleEndChat = async () => {
@@ -405,10 +468,16 @@ export default function ActiveChatModal({ session, onClose }) {
       endChatSession(sessionId);
       localStorage.setItem("lastEndedChatSessionId", sessionId);
       
-      const finalGross = Number(res?.data?.totalAmountDeducted || res?.totalAmountDeducted || currentEarnings).toFixed(2);
-      const finalPlatFee = Number(res?.data?.platformFee || res?.platformFee || (Number(currentEarnings) * 0.40)).toFixed(2);
-      const finalEarning = Number(res?.data?.astrologerEarnings || res?.astrologerEarnings || (Number(currentEarnings) * 0.60)).toFixed(2);
-      const finalSecs = res?.data?.totalDurationSeconds || res?.totalDurationSeconds || secondsElapsed;
+      const sObj = res?.data || res?.session || res || {};
+      const rawSecs = Number(sObj.totalDurationSeconds || sObj.durationSeconds || res?.totalDurationSeconds || 0);
+      const finalSecs = rawSecs > 0 ? rawSecs : (secondsElapsedRef.current || secondsElapsed || 1);
+      const calculatedGross = (Math.max(1, finalSecs) * (perMinuteRate / 60)).toFixed(2);
+      const rawGross = (sObj.totalAmountDeducted !== undefined && Number(sObj.totalAmountDeducted) > 0)
+        ? Number(sObj.totalAmountDeducted)
+        : Number(calculatedGross);
+      const finalGross = rawGross.toFixed(2);
+      const finalPlatFee = (rawGross * 0.40).toFixed(2);
+      const finalEarning = (rawGross * 0.60).toFixed(2);
       
       onClose({
         clientName: user?.name || "Client User",
@@ -420,34 +489,39 @@ export default function ActiveChatModal({ session, onClose }) {
       });
     } catch (err) {
       console.error("Error ending chat:", err);
+      const finalSecs = secondsElapsedRef.current || secondsElapsed || 1;
+      const calculatedGross = (Math.max(1, finalSecs) * (perMinuteRate / 60)).toFixed(2);
+      const rawGross = Number(calculatedGross);
       onClose({
         clientName: user?.name || "Client User",
         type: "Chat",
-        duration: formatTimer(secondsElapsed),
-        totalDeducted: Number(currentEarnings).toFixed(2),
-        platformFee: (Number(currentEarnings) * 0.40).toFixed(2),
-        earnings: (Number(currentEarnings) * 0.60).toFixed(2)
+        duration: formatTimer(finalSecs),
+        totalDeducted: rawGross.toFixed(2),
+        platformFee: (rawGross * 0.40).toFixed(2),
+        earnings: (rawGross * 0.60).toFixed(2)
       });
     }
   };
 
   // Format HH:MM:SS or MM:SS
   const formatTimer = (totalSeconds) => {
-    const hrs = Math.floor(totalSeconds / 3600);
-    const mins = Math.floor((totalSeconds % 3600) / 60);
-    const secs = totalSeconds % 60;
+    const s = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+    const hrs = Math.floor(s / 3600);
+    const mins = Math.floor((s % 3600) / 60);
+    const secs = s % 60;
     if (hrs > 0) {
       return `${hrs.toString().padStart(2, "0")}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
     }
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   };
 
-  // Calculate current earnings
-  const elapsedMinutes = Math.max(1, Math.ceil(secondsElapsed / 60));
-  const totalAmt = Number(session?.totalAmountDeducted || session?.astrologerEarnings || 0);
+  // Calculate exact pro-rata second-based gross charges (e.g. ₹9/min = ₹0.15/sec)
+  const ratePerSecond = perMinuteRate / 60;
+  const currentExactGross = parseFloat((Math.max(1, secondsElapsed) * ratePerSecond).toFixed(2));
+  const totalAmt = Number(session?.totalAmountDeducted || 0);
   const currentEarnings = isReadOnly && totalAmt > 0
     ? totalAmt.toFixed(2)
-    : (elapsedMinutes * perMinuteRate).toFixed(2);
+    : currentExactGross.toFixed(2);
   currentEarningsRef.current = currentEarnings;
 
   return (

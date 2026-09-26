@@ -14,6 +14,7 @@ const listeners = {
   receiveMessage: [],
   timerTick: [],
   walletWarning: [],
+  userTyping: [],
   chatEnded: [],
 };
 
@@ -382,6 +383,7 @@ export const connectSocket = () => {
   });
 
   // Receive Message in Chat Room (Listens to all message event names backend might emit)
+  const recentMsgIds = new Set();
   const handleMsgReceived = (message) => {
     if (!message) return;
     const extractId = (obj) => {
@@ -397,6 +399,16 @@ export const connectSocket = () => {
       console.log(`🗑️ Discarding message meant for session ${msgSessionId} (Current session is ${currentCleanId})`);
       return;
     }
+
+    const uniqueMsgKey = String(message._id || message.id || message.clientMessageId || "");
+    if (uniqueMsgKey && recentMsgIds.has(uniqueMsgKey)) {
+      return;
+    }
+    if (uniqueMsgKey) {
+      recentMsgIds.add(uniqueMsgKey);
+      setTimeout(() => recentMsgIds.delete(uniqueMsgKey), 3000);
+    }
+
     console.log("💬 Message Received on socket:", message);
     listeners.receiveMessage.forEach((fn) => fn(message));
   };
@@ -424,6 +436,16 @@ export const connectSocket = () => {
     console.log("🎤 Peer Media State Changed:", data);
     listeners.peerMediaStateChanged.forEach((fn) => fn(data));
   });
+
+  // User Typing Indicator Status Event
+  const handleUserTyping = (data) => {
+    console.log("⌨️ User Typing Event Received:", data);
+    listeners.userTyping.forEach((fn) => fn(data));
+  };
+  socket.on("user_typing", handleUserTyping);
+  socket.on("typing_status", handleUserTyping);
+  socket.on("typing", handleUserTyping);
+  socket.on("user-typing", handleUserTyping);
 
 
   // Chat Session Ended Event (Listens to all backend chat ended event variations)
@@ -536,9 +558,10 @@ export const sendChatMessage = (messageData) => {
   if (s) {
     console.log("📤 Emitting send_message via socket:", messageData);
     
-    const cleanSessionId = String(messageData.sessionId || messageData.chatId || messageData.id || "");
+    const cleanSessionId = String(messageData.sessionId || messageData.chatId || messageData.roomId || "");
     const cleanSenderId = String(messageData.senderId || messageData.astrologerId || messageData.sender || "");
     const cleanText = String(messageData.text || messageData.message || messageData.content || "");
+    const clientMessageId = String(messageData.clientMessageId || messageData.tempId || messageData.id || "");
 
     const specPayload = {
       sessionId: cleanSessionId,
@@ -550,7 +573,9 @@ export const sendChatMessage = (messageData) => {
       role: "astrologer",
       text: cleanText,
       message: cleanText,
-      content: cleanText
+      content: cleanText,
+      clientMessageId: clientMessageId || undefined,
+      tempId: clientMessageId || undefined
     };
 
     s.emit("send_message", specPayload);
@@ -564,7 +589,17 @@ export const sendChatMessage = (messageData) => {
 export const emitTyping = (sessionId, isTyping) => {
   const s = connectSocket();
   if (s) {
-    s.emit("typing_status", { sessionId, isTyping, senderType: "ASTROLOGER" });
+    const payload = { 
+      sessionId, 
+      chatId: sessionId,
+      isTyping: Boolean(isTyping), 
+      senderType: "ASTROLOGER", 
+      role: "astrologer" 
+    };
+    s.emit("typing_status", payload);
+    s.emit("typing", payload);
+    s.emit("astro_typing", payload);
+    s.emit("astrologer_typing", payload);
   }
 };
 

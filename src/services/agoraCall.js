@@ -29,8 +29,10 @@ export const joinAgoraCallChannel = async ({
   callbacks = {}
 }) => {
   try {
-    const finalAppId = appId || import.meta.env.VITE_AGORA_APP_ID || "demo_app_id";
-    console.log(`🎥 Initializing Agora RTC (${callType}) for channel:`, channelName, "AppID:", finalAppId);
+    const finalAppId = appId || import.meta.env.VITE_AGORA_APP_ID || "af89ac0f87f4412ea75f23aba4717e04";
+    const numericUid = uid !== undefined && uid !== null ? Number(uid) : null;
+    
+    console.log(`[AGORA] init - type: ${callType}, channel: ${channelName}, uid: ${numericUid}, appId: ${finalAppId}`);
 
     // Store callbacks
     callEvents.onRemoteUserJoined = callbacks.onRemoteUserJoined || null;
@@ -57,22 +59,39 @@ export const joinAgoraCallChannel = async ({
 
     // Handle Safari/Mobile Autoplay restrictions
     AgoraRTC.onAutoplayFailed = () => {
-      console.warn("Autoplay blocked by browser. User must click to resume audio.");
-      alert("Browser blocked audio. Please click anywhere on the page to hear the call.");
+      console.warn("[AGORA] Autoplay blocked by browser policy. User gesture required to resume audio.");
     };
 
     // Register Remote Event Listeners
+    client.on("user-joined", (user) => {
+      console.log(`[AGORA] remote-user-joined: ${user.uid}`);
+      if (callEvents.onRemoteUserJoined) {
+        callEvents.onRemoteUserJoined(user);
+      }
+    });
+
     client.on("user-published", async (user, mediaType) => {
-      console.log("👤 Remote user published track:", user.uid, mediaType);
-      if (client) {
-        await client.subscribe(user, mediaType);
+      if (mediaType === "audio") {
+        console.log(`[AGORA] remote-audio-published by uid: ${user.uid}`);
+      } else if (mediaType === "video") {
+        console.log(`[AGORA] remote-video-published by uid: ${user.uid}`);
       }
 
-      if (mediaType === "audio") {
+      if (client) {
+        await client.subscribe(user, mediaType);
+        if (mediaType === "audio") {
+          console.log(`[AGORA] remote-audio-subscribed for uid: ${user.uid}`);
+        } else if (mediaType === "video") {
+          console.log(`[AGORA] remote-video-subscribed for uid: ${user.uid}`);
+        }
+      }
+
+      if (mediaType === "audio" && user.audioTrack) {
         try {
-          user.audioTrack?.play();
+          user.audioTrack.play();
+          console.log(`[AGORA] remote-audio-playing for uid: ${user.uid}`);
         } catch (e) {
-          console.error("Audio playback error:", e);
+          console.error(`[AGORA] Audio playback error for uid: ${user.uid}`, e);
         }
       }
 
@@ -82,59 +101,50 @@ export const joinAgoraCallChannel = async ({
     });
 
     client.on("user-left", (user, reason) => {
-      console.log("👋 Remote user left channel:", user.uid, reason);
+      console.log(`[AGORA] remote-user-left: ${user.uid}, reason: ${reason}`);
       if (callEvents.onRemoteUserLeft) {
         callEvents.onRemoteUserLeft(user, reason);
       }
     });
 
-    client.on("user-joined", (user) => {
-      console.log("🤝 Remote user joined channel:", user.uid);
-      if (callEvents.onRemoteUserJoined) {
-        callEvents.onRemoteUserJoined(user);
-      }
-    });
-
-    // STEP 1: Request mic/camera permissions FIRST — before joining Agora.
-    // The browser shows the permission dialog when getUserMedia is called
-    // inside createMicrophoneAudioTrack/createMicrophoneAndCameraTracks.
-    // If we join() first, the dialog appears AFTER the network handshake
-    // (appearing "late") or gets silently suppressed in Firefox/Safari.
-    console.log("🎤 Requesting media permissions for " + callType + " call...");
+    // STEP 1: Request mic/camera permissions FIRST
     if (callType === "VIDEO") {
       try {
         [localAudioTrack, localVideoTrack] = await AgoraRTC.createMicrophoneAndCameraTracks(
           { encoderConfig: "speech_standard" },
           { encoderConfig: "720p_1", facingMode: "user" }
         );
-        console.log("📹 Camera & Mic tracks created — permissions granted.");
+        console.log("[AGORA] local-audio-created");
+        console.log("[AGORA] local-video-created");
       } catch (mediaErr) {
         console.warn("⚠️ Camera/Mic failed, falling back to audio-only:", mediaErr.message);
         localAudioTrack = await AgoraRTC.createMicrophoneAudioTrack({ encoderConfig: "speech_standard" });
         localVideoTrack = null;
+        console.log("[AGORA] local-audio-created (audio-only fallback)");
       }
     } else {
-      // Audio Call Only — never requests camera permission
       localAudioTrack = await AgoraRTC.createMicrophoneAudioTrack({ encoderConfig: "speech_standard" });
       localVideoTrack = null;
-      console.log("🎙️ Mic track created — mic permission granted.");
+      console.log("[AGORA] local-audio-created");
     }
 
-    // STEP 2: Join Agora channel (network handshake only, no permissions needed)
+    // STEP 2: Join Agora channel (without logging token)
+    console.log(`[AGORA] join-start - channel: ${channelName}, uid: ${numericUid}`);
     const resolvedToken = (token && !String(token).startsWith("mock_")) ? token : null;
     const joinedUid = await client.join(
       finalAppId,
       channelName,
       resolvedToken,
-      uid || Math.floor(Math.random() * 10000)
+      numericUid
     );
-    console.log("✅ Joined Agora RTC channel with UID:", joinedUid);
+    console.log(`[AGORA] join-success - assigned UID: ${joinedUid}`);
 
     // STEP 3: Publish local tracks
     const tracksToPublish = [localAudioTrack, localVideoTrack].filter(Boolean);
     if (tracksToPublish.length > 0) {
       await client.publish(tracksToPublish);
-      console.log("📡 Published " + tracksToPublish.length + " local track(s) to channel.");
+      if (localAudioTrack) console.log("[AGORA] local-audio-published");
+      if (localVideoTrack) console.log("[AGORA] local-video-published");
     }
 
     return {
@@ -145,16 +155,15 @@ export const joinAgoraCallChannel = async ({
     };
 
   } catch (err) {
-    console.error("❌ Failed to join Agora RTC Channel:", err);
+    console.error("[AGORA] Failed to join Agora RTC Channel:", err);
     if (callEvents.onError) {
       callEvents.onError(err);
     }
-    // Return graceful fallback state so UI doesn't crash if demo AppID is invalid
     return {
-      uid: uid || 1234,
+      uid: uid || null,
       localAudioTrack: null,
       localVideoTrack: null,
-      isDemoFallback: true
+      error: err
     };
   }
 };
@@ -166,9 +175,9 @@ export const playLocalVideoTrack = (domElement) => {
   if (localVideoTrack && domElement) {
     try {
       localVideoTrack.play(domElement);
-      console.log("▶️ Playing local video track in element");
+      console.log("[AGORA] local-video-playing in DOM element");
     } catch (err) {
-      console.error("Error playing local video track:", err);
+      console.error("[AGORA] Error playing local video track:", err);
     }
   }
 };
@@ -180,9 +189,9 @@ export const playRemoteVideoTrack = (remoteUser, domElement) => {
   if (remoteUser && remoteUser.videoTrack && domElement) {
     try {
       remoteUser.videoTrack.play(domElement);
-      console.log("▶️ Playing remote video track for user:", remoteUser.uid);
+      console.log(`[AGORA] remote-video-playing for uid: ${remoteUser.uid}`);
     } catch (err) {
-      console.error("Error playing remote video track:", err);
+      console.error(`[AGORA] Error playing remote video track for uid: ${remoteUser.uid}:`, err);
     }
   }
 };
@@ -194,7 +203,7 @@ export const toggleMicrophoneMute = async () => {
   if (localAudioTrack) {
     isMicMuted = !isMicMuted;
     await localAudioTrack.setEnabled(!isMicMuted);
-    console.log(`🎙️ Microphone ${isMicMuted ? "MUTED" : "UNMUTED"}`);
+    console.log(`[AGORA] Microphone ${isMicMuted ? "MUTED" : "UNMUTED"}`);
     return isMicMuted;
   }
   return false;
@@ -207,7 +216,7 @@ export const toggleCameraState = async () => {
   if (localVideoTrack) {
     isCameraOff = !isCameraOff;
     await localVideoTrack.setEnabled(!isCameraOff);
-    console.log(`📹 Camera ${isCameraOff ? "DISABLED" : "ENABLED"}`);
+    console.log(`[AGORA] Camera ${isCameraOff ? "DISABLED" : "ENABLED"}`);
     return isCameraOff;
   }
   return false;
@@ -218,7 +227,7 @@ export const toggleCameraState = async () => {
  */
 export const leaveAgoraCallChannel = async () => {
   try {
-    console.log("🔴 Leaving Agora RTC Channel...");
+    console.log("[AGORA] leave");
 
     if (localAudioTrack) {
       localAudioTrack.stop();
@@ -238,9 +247,9 @@ export const leaveAgoraCallChannel = async () => {
       rtcClient = null;
     }
 
-    console.log("✅ Successfully left Agora channel and destroyed tracks.");
+    console.log("[AGORA] cleanup complete");
   } catch (err) {
-    console.error("Error leaving Agora channel:", err);
+    console.error("[AGORA] Error leaving Agora channel:", err);
   }
 };
 
@@ -250,22 +259,24 @@ export const leaveAgoraCallChannel = async () => {
 export const switchMicrophone = async (deviceId) => {
   if (localAudioTrack) {
     await localAudioTrack.setDevice(deviceId);
-    console.log(`🎙️ Switched microphone to: ${deviceId}`);
+    console.log(`[AGORA] Switched microphone to: ${deviceId}`);
     return true;
   }
   return false;
 };
+
 /**
  * Switch current local camera device
  */
 export const switchCamera = async (deviceId) => {
   if (localVideoTrack) {
     await localVideoTrack.setDevice(deviceId);
-    console.log(`📹 Switched camera to: ${deviceId}`);
+    console.log(`[AGORA] Switched camera to: ${deviceId}`);
     return true;
   }
   return false;
 };
+
 /**
  * Retrieve active audio and video tracks
  */
