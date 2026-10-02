@@ -288,7 +288,8 @@ export const acceptChatApi = async (sessionId, rawReq = {}) => {
       sessionId: idToUse,
       chatId: idToUse,
       _id: idToUse,
-      id: idToUse
+      id: idToUse,
+      protocol: 2 // this client speaks the Session Engine protocol (server-authoritative clock and result)
     };
 
     const res = await fetch(API_ENDPOINTS.CHAT_ACCEPT, {
@@ -471,6 +472,85 @@ export const checkPendingRequestsApi = async () => {
 
     if (!astroId) return null;
 
+    const normalizeUserData = (rawObj) => {
+      if (!rawObj) return { name: "Client User" };
+      const userObj = (typeof rawObj.user === "object" && rawObj.user)
+        || (typeof rawObj.userId === "object" && rawObj.userId)
+        || (typeof rawObj.client === "object" && rawObj.client)
+        || rawObj;
+
+      const constructedFullName = (userObj.firstname || userObj.first_name || rawObj.firstname)
+        ? `${userObj.firstname || userObj.first_name || rawObj.firstname || ""} ${userObj.lastname || userObj.last_name || rawObj.lastname || ""}`.trim()
+        : "";
+
+      const rawName =
+        userObj.name ||
+        userObj.fullName ||
+        userObj.full_name ||
+        constructedFullName ||
+        userObj.userName ||
+        userObj.user_name ||
+        userObj.username ||
+        rawObj.name ||
+        rawObj.fullName ||
+        rawObj.userName;
+
+      const userIdStr = typeof userObj._id === "string" ? userObj._id : typeof rawObj.userId === "string" ? rawObj.userId : typeof rawObj.user === "string" ? rawObj.user : "";
+      const phone = userObj.phone || rawObj.phone || "";
+
+      const fallbackName = phone ? `User (${phone})` : (userIdStr ? `User #${String(userIdStr).slice(-4)}` : "Client User");
+      const name = rawName && typeof rawName === "string" && rawName.trim() && rawName.trim() !== "Client User" ? rawName.trim() : fallbackName;
+
+      const avatar =
+        userObj.profileImage ||
+        userObj.avatar ||
+        userObj.profilePic ||
+        rawObj.profileImage ||
+        rawObj.avatar ||
+        rawObj.userAvatar ||
+        "https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=120&auto=format&fit=crop&q=80";
+
+      let rawDob = userObj.dob || userObj.dateofbirth || userObj.dateOfBirth || rawObj.dob || rawObj.dateofbirth || rawObj.dateOfBirth;
+      let dob = "Not Specified";
+      if (rawDob && typeof rawDob === "string" && rawDob.trim() && rawDob.trim() !== "Not Specified") {
+        dob = rawDob.trim();
+        if (/^\d{4}-\d{2}-\d{2}/.test(dob)) {
+          try {
+            const d = new Date(dob);
+            if (!isNaN(d.getTime())) {
+              const day = String(d.getDate()).padStart(2, '0');
+              const month = String(d.getMonth() + 1).padStart(2, '0');
+              const year = d.getFullYear();
+              dob = `${day}/${month}/${year}`;
+            }
+          } catch (e) {}
+        }
+      }
+
+      const rawTob = userObj.tob || userObj.timeofbirth || userObj.timeOfBirth || rawObj.tob || rawObj.timeofbirth;
+      const tob = (rawTob && typeof rawTob === "string" && rawTob.trim()) ? rawTob.trim() : "Not Specified";
+
+      const rawPob = userObj.pob || userObj.placeofbirth || userObj.placeOfBirth || userObj.birthPlace || (userObj.birthLocation && (userObj.birthLocation.name || userObj.birthLocation.city || userObj.birthLocation.state)) || userObj.city || rawObj.pob || rawObj.placeofbirth;
+      const pob = (rawPob && typeof rawPob === "string" && rawPob.trim()) ? rawPob.trim() : "Not Specified";
+
+      const rawTopic = userObj.topic || userObj.consultationTopic || rawObj.topic || rawObj.consultationTopic;
+      const topic = (rawTopic && typeof rawTopic === "string" && rawTopic.trim()) ? rawTopic.trim() : "Astrology Consultation";
+
+      const rawGender = userObj.gender || rawObj.gender;
+      const gender = (rawGender && typeof rawGender === "string" && rawGender.trim()) ? rawGender.trim() : "Not Specified";
+
+      return {
+        _id: userObj._id || userObj.id || userIdStr || "",
+        name,
+        avatar,
+        dob,
+        tob,
+        pob,
+        topic,
+        gender
+      };
+    };
+
     const urls = [
       `${SOCKET_URL}/api/chat/sessions?astrologerId=${astroId}`
     ];
@@ -496,22 +576,11 @@ export const checkPendingRequestsApi = async () => {
           });
           if (pending) {
             const req = pending;
-            const userObj = (typeof req.user === "object" && req.user) || (typeof req.userId === "object" && req.userId) || {};
-            const rawName = userObj.name || userObj.fullName || userObj.userName || req.userName || req.name || req.fullName;
-            const userIdStr = typeof req.userId === "string" ? req.userId : typeof req.user === "string" ? req.user : "";
-            const name = rawName && typeof rawName === "string" && rawName.trim() ? rawName.trim() : (userIdStr ? `User #${userIdStr.slice(-4)}` : "Client User");
+            const normalizedUser = normalizeUserData(req);
 
             return {
               sessionId: req._id || req.sessionId || req.id,
-              user: {
-                _id: userObj._id || userObj.id || userIdStr || "",
-                name: name,
-                avatar: userObj.profileImage || userObj.avatar || req.userAvatar || req.avatar || "https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=120&auto=format&fit=crop&q=80",
-                dob: userObj.dob || userObj.dateofbirth || userObj.dateOfBirth || req.dob || "Not Specified",
-                tob: userObj.tob || userObj.timeofbirth || userObj.timeOfBirth || req.tob || "Not Specified",
-                pob: userObj.pob || userObj.placeofbirth || userObj.placeOfBirth || req.pob || "Not Specified",
-                topic: userObj.topic || req.topic || "Astrology Consultation"
-              },
+              user: normalizedUser,
               perMinuteRate: req.perMinuteRate || req.rate || 10,
               requestedAt: req.createdAt || new Date().toISOString()
             };
@@ -590,23 +659,28 @@ export const acceptCallApi = async (callId) => {
       ...(token ? { "Authorization": `Bearer ${token}`, "x-auth-token": token, "token": token } : {})
     };
 
-    const bodyData = { sessionId: idToUse, callId: idToUse };
+    const bodyData = { sessionId: idToUse, callId: idToUse, protocol: 2 };
 
-    let res = await fetch(`${SOCKET_URL}/api/video-session/accept/${idToUse}`, {
+    const res = await fetch(`${SOCKET_URL}/api/video-session/accept/${idToUse}`, {
       method: "POST",
       headers,
       body: JSON.stringify(bodyData)
     }).catch(() => null);
 
-    if (res && res.ok) {
-      const json = await res.json().catch(() => ({}));
+    if (!res) {
+      return { success: false, callId, message: "Could not reach the server. Please try again." };
+    }
+    const json = await res.json().catch(() => ({}));
+    if (res.ok) {
       console.log("✅ acceptCallApi Response:", json);
       return json;
     }
+    // The server refused (request expired, user left, user's balance dropped...): never pretend it was accepted
+    return { success: false, callId, message: json.message || "This request can no longer be accepted.", code: json.code };
   } catch (err) {
     console.error("Error accepting call API:", err);
+    return { success: false, callId, message: "Could not accept the call. Please try again." };
   }
-  return { success: true, callId };
 };
 
 /**
@@ -722,6 +796,85 @@ export const checkPendingCallRequestsApi = async () => {
       astroId = localStorage.getItem("astrologerId") || localStorage.getItem("userId") || "";
     }
 
+    const normalizeUserData = (rawObj) => {
+      if (!rawObj) return { name: "Client User" };
+      const userObj = (typeof rawObj.user === "object" && rawObj.user)
+        || (typeof rawObj.userId === "object" && rawObj.userId)
+        || (typeof rawObj.client === "object" && rawObj.client)
+        || rawObj;
+
+      const constructedFullName = (userObj.firstname || userObj.first_name || rawObj.firstname)
+        ? `${userObj.firstname || userObj.first_name || rawObj.firstname || ""} ${userObj.lastname || userObj.last_name || rawObj.lastname || ""}`.trim()
+        : "";
+
+      const rawName =
+        userObj.name ||
+        userObj.fullName ||
+        userObj.full_name ||
+        constructedFullName ||
+        userObj.userName ||
+        userObj.user_name ||
+        userObj.username ||
+        rawObj.name ||
+        rawObj.fullName ||
+        rawObj.userName;
+
+      const userIdStr = typeof userObj._id === "string" ? userObj._id : typeof rawObj.userId === "string" ? rawObj.userId : typeof rawObj.user === "string" ? rawObj.user : "";
+      const phone = userObj.phone || rawObj.phone || "";
+
+      const fallbackName = phone ? `User (${phone})` : (userIdStr ? `User #${String(userIdStr).slice(-4)}` : "Client User");
+      const name = rawName && typeof rawName === "string" && rawName.trim() && rawName.trim() !== "Client User" ? rawName.trim() : fallbackName;
+
+      const avatar =
+        userObj.profileImage ||
+        userObj.avatar ||
+        userObj.profilePic ||
+        rawObj.profileImage ||
+        rawObj.avatar ||
+        rawObj.userAvatar ||
+        "https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=120&auto=format&fit=crop&q=80";
+
+      let rawDob = userObj.dob || userObj.dateofbirth || userObj.dateOfBirth || rawObj.dob || rawObj.dateofbirth || rawObj.dateOfBirth;
+      let dob = "Not Specified";
+      if (rawDob && typeof rawDob === "string" && rawDob.trim() && rawDob.trim() !== "Not Specified") {
+        dob = rawDob.trim();
+        if (/^\d{4}-\d{2}-\d{2}/.test(dob)) {
+          try {
+            const d = new Date(dob);
+            if (!isNaN(d.getTime())) {
+              const day = String(d.getDate()).padStart(2, '0');
+              const month = String(d.getMonth() + 1).padStart(2, '0');
+              const year = d.getFullYear();
+              dob = `${day}/${month}/${year}`;
+            }
+          } catch (e) {}
+        }
+      }
+
+      const rawTob = userObj.tob || userObj.timeofbirth || userObj.timeOfBirth || rawObj.tob || rawObj.timeofbirth;
+      const tob = (rawTob && typeof rawTob === "string" && rawTob.trim()) ? rawTob.trim() : "Not Specified";
+
+      const rawPob = userObj.pob || userObj.placeofbirth || userObj.placeOfBirth || userObj.birthPlace || (userObj.birthLocation && (userObj.birthLocation.name || userObj.birthLocation.city || userObj.birthLocation.state)) || userObj.city || rawObj.pob || rawObj.placeofbirth;
+      const pob = (rawPob && typeof rawPob === "string" && rawPob.trim()) ? rawPob.trim() : "Not Specified";
+
+      const rawTopic = userObj.topic || userObj.consultationTopic || rawObj.topic || rawObj.consultationTopic;
+      const topic = (rawTopic && typeof rawTopic === "string" && rawTopic.trim()) ? rawTopic.trim() : "Astrology Consultation";
+
+      const rawGender = userObj.gender || rawObj.gender;
+      const gender = (rawGender && typeof rawGender === "string" && rawGender.trim()) ? rawGender.trim() : "Not Specified";
+
+      return {
+        _id: userObj._id || userObj.id || userIdStr || "",
+        name,
+        avatar,
+        dob,
+        tob,
+        pob,
+        topic,
+        gender
+      };
+    };
+
     if (!astroId) return null;
 
     const urls = [
@@ -753,22 +906,12 @@ export const checkPendingCallRequestsApi = async () => {
 
           if (pending) {
             const req = pending;
-            const userObj = (typeof req.user === "object" && req.user) || (typeof req.userId === "object" && req.userId) || {};
-            const rawName = userObj.name || userObj.fullName || userObj.userName || req.userName || req.name || req.fullName;
-            const name = rawName && typeof rawName === "string" && rawName.trim() ? rawName.trim() : "Client User";
+            const normalizedUser = normalizeUserData(req);
 
             return {
               callId: req._id || req.sessionId || req.id,
               sessionId: req._id || req.sessionId || req.id,
-              user: {
-                _id: userObj._id || userObj.id || "",
-                name: name,
-                avatar: userObj.profileImage || userObj.avatar || req.avatar || "https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=120&auto=format&fit=crop&q=80",
-                dob: userObj.dob || userObj.dateofbirth || userObj.dateOfBirth || req.dob || "Not Specified",
-                tob: userObj.tob || userObj.timeofbirth || userObj.timeOfBirth || req.tob || "Not Specified",
-                pob: userObj.pob || userObj.placeofbirth || userObj.placeOfBirth || req.pob || "Not Specified",
-                topic: userObj.topic || req.topic || "Astrology Consultation"
-              },
+              user: normalizedUser,
               callType: (req.callType || req.type || "AUDIO").toUpperCase(),
               perMinuteRate: req.perMinuteRate || req.rate || 25,
               channelName: req.channelName || `video_${req._id || req.sessionId}`,
@@ -811,9 +954,61 @@ export const updateAstroProfileApi = async (astroId, payload) => {
 };
 
 /**
- * Fetch call session by ID
+ * Universal active session fetcher from backend
+ */
+export const fetchActiveSessionApi = async () => {
+  try {
+    const token = localStorage.getItem("token") || localStorage.getItem("astrologerToken") || "";
+    if (!token) return null;
+
+    const response = await fetch(`${BACKEND_URL}/api/session/active`, {
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "x-auth-token": token,
+        "token": token
+      }
+    });
+    const data = await response.json();
+    // ACTIVE is running; CONNECTING is a call whose media channel is still being joined (recoverable too).
+    // Server-provided Agora credentials are attached so the call can be re-joined after a refresh.
+    if (data && data.success && data.data && (data.data.status === "ACTIVE" || data.data.status === "CONNECTING")) {
+      const session = data.data;
+      const agora = session.agoraConfig || null;
+      return agora ? { ...session, agora, rtc: agora, appId: agora.appId || session.appId, channelName: session.channelName || agora.channelName } : session;
+    }
+    return null;
+  } catch (err) {
+    console.warn("fetchActiveSessionApi error:", err);
+    return null;
+  }
+};
+
+/**
+ * Fetch call/session by ID using Session Engine endpoint
  */
 export const fetchCallStateApi = async (sessionId) => {
-  const response = await api.get(`/api/calls/${sessionId}`);
-  return response.data;
+  try {
+    const token = localStorage.getItem("token") || localStorage.getItem("astrologerToken") || "";
+    const headers = {
+      "Authorization": `Bearer ${token}`,
+      "x-auth-token": token,
+      "token": token
+    };
+
+    let res = await fetch(`${BACKEND_URL}/api/session/details/${sessionId}`, { headers }).catch(() => null);
+    if (!res || !res.ok) {
+      res = await fetch(`${BACKEND_URL}/api/video-session/details/${sessionId}`, { headers }).catch(() => null);
+    }
+    if (!res || !res.ok) {
+      res = await fetch(`${BACKEND_URL}/api/chat/details/${sessionId}`, { headers }).catch(() => null);
+    }
+    if (res && res.ok) {
+      const data = await res.json();
+      return data?.session || data?.data || data;
+    }
+    return null;
+  } catch (err) {
+    console.warn("fetchCallStateApi error:", err);
+    return null;
+  }
 };

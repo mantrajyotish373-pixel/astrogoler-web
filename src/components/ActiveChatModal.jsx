@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { Send, PhoneOff, Clock, User, ChevronDown, ChevronUp, Image, AlertTriangle, ShieldAlert, CheckCheck, Plus, Calendar, MapPin, Star, Copy, Wallet } from "lucide-react";
-import { sendChatMessage, emitTyping, endChatSession, subscribeSocketEvent, joinChatRoom, acceptChatRequest } from "../services/socket";
+import { sendChatMessage, emitTyping, endChatSession, subscribeSocketEvent, joinChatRoom, acceptChatRequest, connectSocket } from "../services/socket";
 import { endChatApi, fetchChatMessagesApi, sendChatMessageApi } from "../config/api";
+import { buildSessionSummary } from "../services/sessionSummary";
 
 
 export default function ActiveChatModal({ session, onClose }) {
@@ -33,6 +34,15 @@ export default function ActiveChatModal({ session, onClose }) {
 
   // Determine if this session is already completed (Read-Only Mode)
   const isReadOnly = session?.status === "COMPLETED" || session?.status === "ENDED" || session?.status === "CLOSED" || session?.status === "REJECTED" || session?.status === "CANCELLED" || false;
+
+  // The End button, the server's final result and the status poller can all report the end;
+  // the summary is handed to the parent exactly once.
+  const hasClosedRef = useRef(false);
+  const closeOnce = (summary) => {
+    if (hasClosedRef.current) return;
+    hasClosedRef.current = true;
+    onClose(summary);
+  };
 
   const hasInitialScrollRef = useRef(false);
   const secondsElapsedRef = useRef(0);
@@ -152,8 +162,8 @@ export default function ActiveChatModal({ session, onClose }) {
         joinChatRoom(sessionId);
         acceptChatRequest(sessionId);
 
-        // Sync initial session server time
-        syncServerTime(session?.startTime || session?.createdAt, session?.serverNow);
+        // Sync initial session server time (if no startTime yet, start from fresh Date.now())
+        syncServerTime(session?.startedAt || session?.startTime, session?.serverNow);
 
         // Timestamp-delta local interval
         timer = setInterval(() => {
@@ -239,39 +249,33 @@ export default function ActiveChatModal({ session, onClose }) {
           });
         });
 
-        unsubTimer = subscribeSocketEvent("timerTick", (data) => {
-          if (data?.startTime || data?.serverNow) {
-            syncServerTime(data.startTime, data.serverNow);
+        const handleTimerSync = (data) => {
+          if (data?.startTime || data?.startedAt || data?.serverNow) {
+            syncServerTime(data.startTime || data.startedAt, data.serverNow);
           }
-        });
+        };
+
+        // services/socket.js routes both "timerTick" and "timer_tick" server events here
+        unsubTimer = subscribeSocketEvent("timerTick", handleTimerSync);
 
         unsubWarning = subscribeSocketEvent("walletWarning", (data) => {
           setWalletWarning(data?.message || "User's wallet balance is running low!");
         });
 
-        unsubEnded = subscribeSocketEvent("chatEnded", (data) => {
+        const handleEndReceived = (data) => {
           console.log("🔴 Chat Session Ended Event Received - Closing modal immediately:", data);
-          const sObj = data?.session || data?.data || data || {};
-          const rawSecs = Number(sObj.totalDurationSeconds || sObj.durationSeconds || data?.totalDurationSeconds || 0);
-          const finalSecs = rawSecs > 0 ? rawSecs : (secondsElapsedRef.current || secondsElapsed || 1);
-          const calculatedGross = (Math.max(1, finalSecs) * (perMinuteRate / 60)).toFixed(2);
-          const rawGross = (sObj.totalAmountDeducted !== undefined && Number(sObj.totalAmountDeducted) > 0)
-            ? Number(sObj.totalAmountDeducted)
-            : (data?.totalAmountDeducted !== undefined && Number(data.totalAmountDeducted) > 0)
-            ? Number(data.totalAmountDeducted)
-            : Number(calculatedGross);
-          const finalGross = rawGross.toFixed(2);
-          const finalPlatFee = (rawGross * 0.40).toFixed(2);
-          const finalEarning = (rawGross * 0.60).toFixed(2);
-          onClose({
+          // duration, price and earnings come from the server's final result
+          closeOnce(buildSessionSummary({
             clientName: user?.name || "Client User",
             type: "Chat",
-            duration: formatTimer(finalSecs),
-            totalDeducted: finalGross,
-            platformFee: finalPlatFee,
-            earnings: finalEarning
-          });
-        });
+            payloads: [data],
+            fallbackSeconds: secondsElapsedRef.current || secondsElapsed,
+            ratePerMinute: perMinuteRate
+          }));
+        };
+
+        // services/socket.js routes "chatEnded", "chat_ended" and "session_ended" here
+        unsubEnded = subscribeSocketEvent("chatEnded", handleEndReceived);
 
         // Fallback status & message polling (polls backend every 2.5s to check status and sync chat history)
         statusChecker = setInterval(async () => {
@@ -336,25 +340,13 @@ export default function ActiveChatModal({ session, onClose }) {
 
                   if (status === "COMPLETED" || status === "ENDED" || status === "REJECTED" || status === "CLOSED" || isActive === false) {
                     console.log("🔴 Session status marked ended on backend - Closing modal with summary");
-                    const rawSecs = Number(sObj?.totalDurationSeconds || sObj?.durationSeconds || data?.totalDurationSeconds || 0);
-                    const finalSecs = rawSecs > 0 ? rawSecs : (secondsElapsedRef.current || secondsElapsed || 1);
-                    const calculatedGross = (Math.max(1, finalSecs) * (perMinuteRate / 60)).toFixed(2);
-                    const rawGross = (sObj?.totalAmountDeducted !== undefined && Number(sObj.totalAmountDeducted) > 0)
-                      ? Number(sObj.totalAmountDeducted)
-                      : (data?.totalAmountDeducted !== undefined && Number(data.totalAmountDeducted) > 0)
-                      ? Number(data.totalAmountDeducted)
-                      : Number(calculatedGross);
-                    const finalGross = rawGross.toFixed(2);
-                    const finalPlatFee = (rawGross * 0.40).toFixed(2);
-                    const finalEarning = (rawGross * 0.60).toFixed(2);
-                    onClose({
+                    closeOnce(buildSessionSummary({
                       clientName: user?.name || "Client User",
                       type: "Chat",
-                      duration: formatTimer(finalSecs),
-                      totalDeducted: finalGross,
-                      platformFee: finalPlatFee,
-                      earnings: finalEarning
-                    });
+                      payloads: [data, sObj],
+                      fallbackSeconds: secondsElapsedRef.current || secondsElapsed,
+                      ratePerMinute: perMinuteRate
+                    }));
                     break;
                   }
                 }
@@ -463,44 +455,23 @@ export default function ActiveChatModal({ session, onClose }) {
   };
 
   const handleEndChat = async () => {
+    let res = null;
     try {
-      const res = await endChatApi(sessionId);
+      res = await endChatApi(sessionId);
       endChatSession(sessionId);
       localStorage.setItem("lastEndedChatSessionId", sessionId);
-      
-      const sObj = res?.data || res?.session || res || {};
-      const rawSecs = Number(sObj.totalDurationSeconds || sObj.durationSeconds || res?.totalDurationSeconds || 0);
-      const finalSecs = rawSecs > 0 ? rawSecs : (secondsElapsedRef.current || secondsElapsed || 1);
-      const calculatedGross = (Math.max(1, finalSecs) * (perMinuteRate / 60)).toFixed(2);
-      const rawGross = (sObj.totalAmountDeducted !== undefined && Number(sObj.totalAmountDeducted) > 0)
-        ? Number(sObj.totalAmountDeducted)
-        : Number(calculatedGross);
-      const finalGross = rawGross.toFixed(2);
-      const finalPlatFee = (rawGross * 0.40).toFixed(2);
-      const finalEarning = (rawGross * 0.60).toFixed(2);
-      
-      onClose({
-        clientName: user?.name || "Client User",
-        type: "Chat",
-        duration: formatTimer(finalSecs),
-        totalDeducted: finalGross,
-        platformFee: finalPlatFee,
-        earnings: finalEarning
-      });
     } catch (err) {
       console.error("Error ending chat:", err);
-      const finalSecs = secondsElapsedRef.current || secondsElapsed || 1;
-      const calculatedGross = (Math.max(1, finalSecs) * (perMinuteRate / 60)).toFixed(2);
-      const rawGross = Number(calculatedGross);
-      onClose({
-        clientName: user?.name || "Client User",
-        type: "Chat",
-        duration: formatTimer(finalSecs),
-        totalDeducted: rawGross.toFixed(2),
-        platformFee: (rawGross * 0.40).toFixed(2),
-        earnings: (rawGross * 0.60).toFixed(2)
-      });
     }
+    // The server decided endedAt, duration, price and earnings once. If it could not be reached the
+    // summary is an estimate (marked as such) and the real figures arrive by session:ended.
+    closeOnce(buildSessionSummary({
+      clientName: user?.name || "Client User",
+      type: "Chat",
+      payloads: [res],
+      fallbackSeconds: secondsElapsedRef.current || secondsElapsed,
+      ratePerMinute: perMinuteRate
+    }));
   };
 
   // Format HH:MM:SS or MM:SS

@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { Mic, MicOff, Video, VideoOff, PhoneOff, Volume2, Sparkles, User, ShieldAlert, Calendar, Clock, MapPin, MessageSquare, Send, X, Copy, ChevronDown, ChevronUp, Plus } from "lucide-react";
 import { endCallApi, fetchChatMessagesApi, sendChatMessageApi, uploadImageApi } from "../config/api";
-import { endCallSession, subscribeSocketEvent, emitMediaStateChange, joinCallRoom, sendChatMessage } from "../services/socket";
+import { endCallSession, subscribeSocketEvent, emitMediaStateChange, joinCallRoom, sendChatMessage, reportMediaReady } from "../services/socket";
+import { buildSessionSummary } from "../services/sessionSummary";
 import AgoraRTC from "agora-rtc-sdk-ng";
 import {
   joinAgoraCallChannel,
@@ -49,6 +50,34 @@ export default function ActiveCallModal({ session, onClose }) {
   durationRef.current = duration;
   const currentEarningsRef = useRef("0.00");
 
+  const [userVideoFilter, setUserVideoFilter] = useState({
+    isLowLightOn: false,
+    isTouchUpOn: false,
+    isBlurBgOn: false,
+  });
+
+  const getFilterStyle = (f) => {
+    if (!f) return {};
+    let filterString = '';
+    if (f.isLowLightOn) {
+      filterString += 'brightness(1.45) contrast(1.15) saturate(1.1) ';
+    }
+    if (f.isTouchUpOn) {
+      filterString += 'brightness(1.08) contrast(1.03) saturate(1.12) blur(0.2px) ';
+    }
+    if (f.isBlurBgOn) {
+      filterString += 'contrast(1.05) saturate(1.05) ';
+    }
+
+    return filterString.trim()
+      ? {
+          filter: filterString.trim(),
+          transition: 'filter 0.3s ease',
+          boxShadow: f.isBlurBgOn ? 'inset 0 0 40px rgba(0,0,0,0.5)' : 'none',
+        }
+      : {};
+  };
+
   const callId = session?.callId || session?.sessionId || session?._id || session?.id || "";
   const user = session?.user || session?.session?.user || {};
   
@@ -79,13 +108,68 @@ export default function ActiveCallModal({ session, onClose }) {
     return `${day}/${month}/${year}`;
   };
 
-  // 1. Duration Timer
+  // 1. Authoritative Server Clock Synchronization & Duration Timer
+  const startTimeMsRef = useRef(null);
+  const clockOffsetRef = useRef(0);
+  const lastServerTickMsRef = useRef(0);
+
+  const recalculateElapsed = () => {
+    if (!startTimeMsRef.current) return;
+    const estimatedServerNow = Date.now() - clockOffsetRef.current;
+    const computedSecs = Math.max(0, Math.floor((estimatedServerNow - startTimeMsRef.current) / 1000));
+    setDuration(computedSecs);
+  };
+
+  const syncServerTime = (startTimeVal, serverNowVal) => {
+    const now = Date.now();
+    let isServerSyncValid = true;
+
+    if (serverNowVal) {
+      const parsedServerNow = typeof serverNowVal === 'number' ? serverNowVal : new Date(serverNowVal).getTime();
+      if (!isNaN(parsedServerNow)) {
+        if (parsedServerNow >= lastServerTickMsRef.current) {
+          lastServerTickMsRef.current = parsedServerNow;
+          clockOffsetRef.current = now - parsedServerNow;
+        } else {
+          isServerSyncValid = false;
+        }
+      }
+    }
+
+    if (isServerSyncValid) {
+      if (startTimeVal) {
+        const parsedStart = typeof startTimeVal === 'number' ? startTimeVal : new Date(startTimeVal).getTime();
+        if (!isNaN(parsedStart)) {
+          startTimeMsRef.current = parsedStart;
+        }
+      }
+      recalculateElapsed();
+    }
+  };
+
+  useEffect(() => {
+    syncServerTime(session?.startedAt || session?.startTime, session?.serverNow);
+  }, [session]);
+
   useEffect(() => {
     if (isBillingPaused) return; // Freeze timer on UI during recharge
     const timer = setInterval(() => {
-      setDuration((prev) => prev + 1);
+      recalculateElapsed();
     }, 1000);
-    return () => clearInterval(timer);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        recalculateElapsed();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', recalculateElapsed);
+
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', recalculateElapsed);
+    };
   }, [isBillingPaused]);
 
   useEffect(() => {
@@ -179,6 +263,10 @@ export default function ActiveCallModal({ session, onClose }) {
           playLocalVideoTrack(localVideoRef.current);
         }
       }
+
+      // Joined the media channel: tell the server. The server starts the billing clock (startedAt) the
+      // moment BOTH participants have reported ready, and sends it to both of us.
+      if (res && callId) reportMediaReady(callId);
     };
 
     initCall();
@@ -189,6 +277,11 @@ export default function ActiveCallModal({ session, onClose }) {
       handleEndCall(data);
     });
 
+    const unsubCallEnded = subscribeSocketEvent("call_ended", (data) => {
+      console.log("🔴 Call ended (call_ended) via socket event:", data);
+      handleEndCall(data);
+    });
+
     const unsubSessionEnded = subscribeSocketEvent("session_ended", (data) => {
       console.log("🔴 Session ended via socket event:", data);
       handleEndCall(data);
@@ -196,7 +289,9 @@ export default function ActiveCallModal({ session, onClose }) {
 
     const unsubTimerTick = subscribeSocketEvent("timerTick", (data) => {
       if (data) {
-        if (data.elapsedSeconds !== undefined) {
+        if (data.startedAt || data.startTime || data.serverNow) {
+          syncServerTime(data.startedAt || data.startTime, data.serverNow);
+        } else if (data.elapsedSeconds !== undefined) {
           setDuration(data.elapsedSeconds);
         } else if (data.elapsedMinutes !== undefined) {
           setDuration(data.elapsedMinutes * 60);
@@ -217,12 +312,36 @@ export default function ActiveCallModal({ session, onClose }) {
       }
     });
 
+    const unsubFilter = subscribeSocketEvent("video_filter_applied", (data) => {
+      console.log("🎨 Remote user applied video filter:", data);
+      if (data) {
+        setUserVideoFilter({
+          isLowLightOn: Boolean(data.isLowLightOn),
+          isTouchUpOn: Boolean(data.isTouchUpOn),
+          isBlurBgOn: Boolean(data.isBlurBgOn),
+        });
+      }
+    });
+
+    const unsubFilterChanged = subscribeSocketEvent("filter_changed", (data) => {
+      console.log("🎨 Remote user changed filter:", data);
+      if (data) {
+        setUserVideoFilter({
+          isLowLightOn: Boolean(data.isLowLightOn),
+          isTouchUpOn: Boolean(data.isTouchUpOn),
+          isBlurBgOn: Boolean(data.isBlurBgOn),
+        });
+      }
+    });
+
     return () => {
       isMounted = false;
       unsubEnded();
       unsubTimerTick();
       unsubWarning();
       unsubPeerMedia();
+      unsubFilter();
+      unsubFilterChanged();
       leaveAgoraCallChannel();
     };
   }, [callId, channelName, token, appId, callType]);
@@ -431,53 +550,32 @@ export default function ActiveCallModal({ session, onClose }) {
     }
   };
 
+  const isEndingRef = useRef(false);
+
   const handleEndCall = async (endData = null) => {
-    let summary = null;
+    if (isEndingRef.current) return;
+    isEndingRef.current = true;
+    let res = null;
     try {
       if (callId) {
         endCallSession(callId);
       }
-      const res = await endCallApi(callId).catch(() => null);
-      
-      const sObj = res?.data || res?.session || endData?.session || endData?.data || endData || {};
-      const rawSecs = Number(sObj.totalDurationSeconds || sObj.durationSeconds || endData?.totalDurationSeconds || 0);
-      const finalSecs = rawSecs > 0 ? rawSecs : (durationRef.current || duration || 1);
-      const calculatedGross = (Math.max(1, finalSecs) * (perMinuteRate / 60)).toFixed(2);
-      const rawGross = (sObj.totalAmountDeducted !== undefined && Number(sObj.totalAmountDeducted) > 0)
-        ? Number(sObj.totalAmountDeducted)
-        : (endData?.totalAmountDeducted !== undefined && Number(endData.totalAmountDeducted) > 0)
-        ? Number(endData.totalAmountDeducted)
-        : Number(calculatedGross);
-      const finalGross = rawGross.toFixed(2);
-      const finalPlatFee = (rawGross * 0.40).toFixed(2);
-      const finalEarning = (rawGross * 0.60).toFixed(2);
-      
-      summary = {
-        clientName: clientName,
-        type: isVideoCall ? "Video Call" : "Audio Call",
-        duration: formatTimer(finalSecs),
-        totalDeducted: finalGross,
-        platformFee: finalPlatFee,
-        earnings: finalEarning
-      };
+      res = await endCallApi(callId).catch(() => null);
     } catch (err) {
       console.error("Error ending call:", err);
-      const finalSecs = durationRef.current || duration || 1;
-      const calculatedGross = (Math.max(1, finalSecs) * (perMinuteRate / 60)).toFixed(2);
-      const rawGross = Number(calculatedGross);
-      summary = {
-        clientName: clientName,
-        type: isVideoCall ? "Video Call" : "Audio Call",
-        duration: formatTimer(finalSecs),
-        totalDeducted: rawGross.toFixed(2),
-        platformFee: (rawGross * 0.40).toFixed(2),
-        earnings: (rawGross * 0.60).toFixed(2)
-      };
-    } finally {
-      leaveAgoraCallChannel();
-      if (onClose) {
-        onClose(summary);
-      }
+    }
+    // The server decided endedAt, duration, price and earnings once. If it could not be reached the
+    // summary is an estimate (marked as such) and the real figures arrive by session:ended.
+    const summary = buildSessionSummary({
+      clientName: clientName,
+      type: isVideoCall ? "Video Call" : "Audio Call",
+      payloads: [endData, res],
+      fallbackSeconds: durationRef.current || duration,
+      ratePerMinute: perMinuteRate
+    });
+    leaveAgoraCallChannel();
+    if (onClose) {
+      onClose(summary);
     }
   };
 
@@ -640,7 +738,8 @@ export default function ActiveCallModal({ session, onClose }) {
             <div className="w-full h-full bg-slate-900 relative overflow-hidden">
               <div
                 ref={remoteVideoRef}
-                className="w-full h-full flex items-center justify-center"
+                style={getFilterStyle(userVideoFilter)}
+                className="w-full h-full flex items-center justify-center transition-all duration-300"
               />
               
               {/* Overlay states for Big Window */}

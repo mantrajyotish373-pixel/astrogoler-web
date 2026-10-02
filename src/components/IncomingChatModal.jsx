@@ -2,9 +2,10 @@ import { useState, useEffect } from "react";
 import { Check, X, Clock, Calendar, MapPin, User, Sparkles, MessageSquare, ShieldAlert } from "lucide-react";
 import { acceptChatApi, rejectChatApi } from "../config/api";
 import { acceptChatRequest, joinChatRoom } from "../services/socket";
+import { secondsUntil, syncServerClock } from "../services/serverClock";
 
 export default function IncomingChatModal({ request, onAccept, onDecline }) {
-  const [timeLeft, setTimeLeft] = useState(30);
+  const [timeLeft, setTimeLeft] = useState(() => secondsUntil(request?.expiresAt) ?? 30);
   const [isProcessing, setIsProcessing] = useState(false);
   const [errorAlert, setErrorAlert] = useState(null);
 
@@ -14,6 +15,7 @@ export default function IncomingChatModal({ request, onAccept, onDecline }) {
 
   // Play 30-second Ringtone on Incoming Request (Only when Astrologer is ONLINE)
   useEffect(() => {
+    if (!sessionId) return;
     const isOnline = localStorage.getItem("astro_is_online");
     if (isOnline === "false") {
       console.log("Astrologer is OFFLINE: Ringtone sound suppressed.");
@@ -32,17 +34,25 @@ export default function IncomingChatModal({ request, onAccept, onDecline }) {
       audio.pause();
       audio.currentTime = 0;
     };
-  }, [request]);
+  }, [sessionId]);
 
+  // The request deadline is decided by the SERVER (expiresAt). This is only a display countdown to it;
+  // the client never decides to time out. At zero the card just closes: the server marks the request
+  // missed (and tells the user), so no API call is made from here.
   useEffect(() => {
-    if (timeLeft <= 0) {
-      handleDecline();
-      return;
-    }
     const timer = setInterval(() => {
-      setTimeLeft((prev) => prev - 1);
+      setTimeLeft((prev) => {
+        const fromServer = secondsUntil(request?.expiresAt);
+        return fromServer !== null ? fromServer : prev - 1;
+      });
     }, 1000);
     return () => clearInterval(timer);
+  }, [request?.expiresAt]);
+
+  useEffect(() => {
+    if (timeLeft <= 0 && !isProcessing) {
+      onDecline(sessionId);
+    }
   }, [timeLeft]);
 
   const handleAccept = async () => {
@@ -60,7 +70,16 @@ export default function IncomingChatModal({ request, onAccept, onDecline }) {
         joinChatRoom(sessionId);
         acceptChatRequest(sessionId);
       }
-      onAccept(request);
+      // The server fixed startedAt at the atomic accept; the chat clock is derived from it (not from this click)
+      const accepted = (res && res.data) || {};
+      syncServerClock(accepted.serverNow);
+      onAccept({
+        ...request,
+        startTime: accepted.startTime || accepted.startedAt || null,
+        startedAt: accepted.startedAt || accepted.startTime || null,
+        serverNow: accepted.serverNow || null,
+        perMinuteRate: accepted.perMinuteRate || request.perMinuteRate
+      });
     } catch (err) {
       console.error("Error accepting chat:", err);
       setErrorAlert("This chat request is no longer active or was cancelled.");

@@ -1,9 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import axiosInstance from "../config/axiosInstance";
-import { fetchCallStateApi } from "../config/api";
+import { fetchCallStateApi, fetchActiveSessionApi, uploadImageApi, fetchChatHistoryApi, checkPendingRequestsApi, BACKEND_URL, checkPendingCallRequestsApi, fetchCallHistoryApi, updateAstroProfileApi } from "../config/api";
 import { ArrowLeft, ChevronDown, Mic, Video, MessageSquare, Radio, Mail, Phone, Briefcase, User, Mars, Sliders, Building, Compass, MapPin, Sparkles, LogOut, Camera, Loader2, Play, MessageCircle, CheckCircle, ShieldAlert } from "lucide-react";
-import { uploadImageApi, fetchChatHistoryApi, checkPendingRequestsApi, BACKEND_URL } from "../config/api";
 import Header from "../components/Header";
 import DashboardGrid from "../components/DashboardGrid";
 import WalletModal from "../components/WalletModal";
@@ -12,7 +10,6 @@ import ActiveChatModal from "../components/ActiveChatModal";
 import IncomingCallModal from "../components/IncomingCallModal";
 import ActiveCallModal from "../components/ActiveCallModal";
 import { connectSocket, subscribeSocketEvent, triggerDemoIncomingRequest, triggerDemoIncomingCallRequest } from "../services/socket";
-import { checkPendingCallRequestsApi, fetchCallHistoryApi, updateAstroProfileApi } from "../config/api";
 
 
 
@@ -990,6 +987,14 @@ export default function Dashboard({ onLogout, initialOpenWithdraw = false }) {
   // and kicks the astrologer out of the call page before the session can be restored.
   const hadActiveSession = useRef(false);
 
+  // Chat request ids that were already accepted / declined / cancelled / ended. A request that has been handled must
+  // never be shown (or ring) again, whichever path delivers it: a duplicate socket event, a reconnect, or a late REST poll.
+  const handledChatRequestIds = useRef(new Set());
+  const activeSessionRef = useRef({ chat: null, call: null });
+  const markChatRequestHandled = (id) => {
+    if (id) handledChatRequestIds.current.add(String(id));
+  };
+
   // Redirect to unique URL when call session starts
   useEffect(() => {
     if (activeCallSession) {
@@ -1002,11 +1007,16 @@ export default function Dashboard({ onLogout, initialOpenWithdraw = false }) {
     }
   }, [activeCallSession]);
 
+  useEffect(() => {
+    activeSessionRef.current = { chat: activeChatSession, call: activeCallSession };
+  }, [activeChatSession, activeCallSession]);
+
   // Redirect to unique URL when chat session starts
   useEffect(() => {
     if (activeChatSession) {
       hadActiveSession.current = true;
       const sId = activeChatSession.sessionId || activeChatSession._id || activeChatSession.id;
+      markChatRequestHandled(sId);
       if (sId && !window.location.pathname.includes(`/chat/${sId}`)) {
         navigate(`/chat/${sId}`, { replace: true });
       }
@@ -1036,66 +1046,125 @@ export default function Dashboard({ onLogout, initialOpenWithdraw = false }) {
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [activeCallSession, activeChatSession]);
 
-  // Restore session from URL after refresh (skip if socket already provided a session)
+  // Restore session from URL or backend GET /api/session/active after refresh
   useEffect(() => {
-    if (!sessionId || activeCallSession || activeChatSession) return;
+    if (activeCallSession || activeChatSession) return;
+    let isMounted = true;
+
     const loadSession = async () => {
       try {
-        const res = await axiosInstance.get(`/api/calls/${sessionId}`);
-        const session = res.data.session || res.data.data || res.data;
-        if (!session || typeof session !== "object") return;
+        let session = null;
+        if (sessionId) {
+          session = await fetchCallStateApi(sessionId);
+        } else {
+          session = await fetchActiveSessionApi();
+        }
+
+        if (!isMounted || !session || typeof session !== "object") return;
 
         // If session is already COMPLETED, navigate back silently
         if (session.status && !["ACTIVE", "PENDING"].includes(session.status)) {
           console.log("Session already completed, returning to dashboard.");
-          navigate("/dashboard", { replace: true });
+          if (sessionId) {
+            navigate("/dashboard", { replace: true });
+          }
           return;
         }
 
-        // Session is ACTIVE — restore it so ActiveCallModal / ChatModal reopens.
-        // API now returns appId, agoraToken, channelName for Agora rejoin.
-        if (window.location.pathname.includes("/chat")) {
-          setActiveChatSession(session);
-        } else {
-          setActiveCallSession(session);
+        if (session.status === "ACTIVE" || session.status === "CONNECTING") {
+          const typeUpper = String(session.type || session.callType || "").toUpperCase();
+          if (typeUpper === "CHAT" || window.location.pathname.includes("/chat")) {
+            console.log("🔄 Restored active chat session on Astrologer Dashboard:", session.sessionId || session._id);
+            setActiveChatSession(session);
+          } else {
+            console.log("🔄 Restored active call session on Astrologer Dashboard:", session.sessionId || session._id);
+            setActiveCallSession(session);
+          }
         }
       } catch (err) {
-        console.warn("Could not restore session from URL:", err?.response?.status, sessionId);
-        navigate("/dashboard", { replace: true });
+        console.warn("Could not restore session from backend:", err);
+        if (sessionId) {
+          navigate("/dashboard", { replace: true });
+        }
       }
     };
     loadSession();
+
+    return () => {
+      isMounted = false;
+    };
   }, [sessionId]);
 
   useEffect(() => {
     // Connect to Socket.io backend on Dashboard load
     connectSocket();
 
+    const extractId = (obj) => {
+      if (!obj) return "";
+      if (typeof obj === "string" || typeof obj === "number") return String(obj);
+      return String(obj.sessionId || obj.chatId || obj.callId || obj._id || obj.id || (obj.session && (typeof obj.session === "object" ? (obj.session._id || obj.session.id) : obj.session)) || "");
+    };
+
     // 1. Chat Socket Subscriptions
     const unsubRequest = subscribeSocketEvent("incomingRequest", (reqData) => {
+      const reqId = extractId(reqData);
+      if (reqId && handledChatRequestIds.current.has(reqId)) {
+        console.log("⚠️ Ignored chat request that was already handled:", reqId);
+        return;
+      }
       console.log("⚡ Real-time chat request received on Dashboard:", reqData);
       setIncomingRequest(reqData);
     });
 
-    const unsubEndedGlobal = subscribeSocketEvent("chatEnded", (data) => {
-      console.log("🔴 Global chatEnded event on Dashboard:", data);
+    const unsubCancelled = subscribeSocketEvent("incomingRequestCancelled", (data) => {
+      console.log("🚫 Incoming request cancelled event on Dashboard:", data);
+      const targetId = extractId(data);
+      markChatRequestHandled(targetId);
+      const reasonStr = String(data?.reason || data?.rejectionReason || "").toUpperCase();
+      const isUserCancelled = reasonStr.includes("USER") || data?.cancelledBy === "USER" || String(data?.message || "").toLowerCase().includes("by user");
 
-      // ✅ Auto-close the incoming chat request overlay if cancelled
-      let wasIncomingActive = false;
-      setIncomingRequest(prev => {
-        const id = data?.sessionId || data?.chatId || data?.id || "";
-        if (prev && (prev.sessionId === id || prev._id === id || prev.id === id)) {
-          wasIncomingActive = true;
+      setIncomingRequest((prev) => {
+        const prevId = extractId(prev);
+        if (prev && (!targetId || prevId === targetId)) {
+          if (isUserCancelled) {
+            setInfoPopup({
+              title: "Request Cancelled",
+              message: "The user has cancelled the chat request. You can consult other clients."
+            });
+          }
           return null;
         }
         return prev;
       });
-      if (wasIncomingActive) {
-        setInfoPopup({
-          title: "Request Cancelled",
-          message: "The user has cancelled the chat session request. You can consult other clients."
-        });
-      }
+
+      setIncomingCallRequest((prev) => {
+        const prevId = extractId(prev);
+        if (prev && (!targetId || prevId === targetId)) {
+          if (isUserCancelled) {
+            setInfoPopup({
+              title: "Request Cancelled",
+              message: "The user has cancelled the call request. You can consult other clients."
+            });
+          }
+          return null;
+        }
+        return prev;
+      });
+    });
+
+    const unsubEndedGlobal = subscribeSocketEvent("chatEnded", (data) => {
+      console.log("🔴 Global chatEnded event on Dashboard:", data);
+      const targetId = extractId(data);
+      markChatRequestHandled(targetId);
+
+      // Auto-close incoming chat request overlay if cancelled/ended
+      setIncomingRequest((prev) => {
+        const prevId = extractId(prev);
+        if (prev && (!targetId || prevId === targetId)) {
+          return null;
+        }
+        return prev;
+      });
     });
 
     // 2. Audio/Video Call Socket Subscriptions
@@ -1105,23 +1174,17 @@ export default function Dashboard({ onLogout, initialOpenWithdraw = false }) {
     });
 
     const unsubCallEnded = subscribeSocketEvent("callEnded", (data) => {
-      console.log("🔴 Call ended on Dashboard - clearing active call:", data);
-      // ✅ Auto-close the incoming call request overlay if cancelled
-      let wasIncomingActive = false;
-      setIncomingCallRequest(prev => {
-        const id = data?.sessionId || data?.callId || data?.id || "";
-        if (prev && (prev.sessionId === id || prev._id === id || prev.id === id)) {
-          wasIncomingActive = true;
+      console.log("🔴 Call ended on Dashboard:", data);
+      const targetId = extractId(data);
+
+      // Auto-close incoming call request overlay if cancelled/ended
+      setIncomingCallRequest((prev) => {
+        const prevId = extractId(prev);
+        if (prev && (!targetId || prevId === targetId)) {
           return null;
         }
         return prev;
       });
-      if (wasIncomingActive) {
-        setInfoPopup({
-          title: "Request Cancelled",
-          message: "The user has cancelled the call session request. You can consult other clients."
-        });
-      }
     });
 
     const unsubCallAccepted = subscribeSocketEvent("call_accepted", (data) => {
@@ -1134,33 +1197,56 @@ export default function Dashboard({ onLogout, initialOpenWithdraw = false }) {
 
     // Fallback REST Polling every 2.5 seconds to guarantee instant reception of call & chat requests
     const pollInterval = setInterval(async () => {
-      if (!incomingRequest && !activeChatSession) {
-        const pendingReq = await checkPendingRequestsApi();
-        if (pendingReq) {
-          console.log("📥 Pending chat request fetched via REST polling:", pendingReq);
-          setIncomingRequest(pendingReq);
+      setIncomingRequest((currentReq) => {
+        const currentId = extractId(currentReq);
+        // no new request is looked for while a session is live: the astrologer is busy, and the answer would be stale anyway
+        const sessionLive = Boolean(activeSessionRef.current.chat || activeSessionRef.current.call);
+        if (!currentId && !sessionLive) {
+          checkPendingRequestsApi().then((pendingReq) => {
+            const newId = extractId(pendingReq);
+            // the poll can be answered from before an accept / cancel: a handled request, or a session that went live meanwhile, is dropped
+            if (pendingReq && !handledChatRequestIds.current.has(newId) && !activeSessionRef.current.chat && !activeSessionRef.current.call) {
+              setIncomingRequest((prev) => {
+                const prevId = extractId(prev);
+                if (prevId && prevId === newId) return prev;
+                console.log("📥 Pending chat request fetched via REST polling:", pendingReq);
+                return pendingReq;
+              });
+            }
+          }).catch(() => {});
         }
-      }
+        return currentReq;
+      });
 
-      if (!incomingCallRequest && !activeCallSession) {
-        const pendingCall = await checkPendingCallRequestsApi();
-        if (pendingCall) {
-          console.log("📞 Pending call request fetched via REST polling:", pendingCall);
-          setIncomingCallRequest(pendingCall);
+      setIncomingCallRequest((currentCallReq) => {
+        const currentCallId = extractId(currentCallReq);
+        if (!currentCallId) {
+          checkPendingCallRequestsApi().then((pendingCall) => {
+            if (pendingCall) {
+              setIncomingCallRequest((prev) => {
+                const prevId = extractId(prev);
+                const newId = extractId(pendingCall);
+                if (prevId && prevId === newId) return prev;
+                console.log("📞 Pending call request fetched via REST polling:", pendingCall);
+                return pendingCall;
+              });
+            }
+          }).catch(() => {});
         }
-      }
+        return currentCallReq;
+      });
     }, 2500);
-
 
     return () => {
       unsubRequest();
+      unsubCancelled();
       unsubEndedGlobal();
       unsubCallRequest();
       unsubCallEnded();
       unsubCallAccepted();
       clearInterval(pollInterval);
     };
-  }, [incomingRequest, activeChatSession, incomingCallRequest, activeCallSession]);
+  }, []);
 
   const handleSimulateDemo = () => {
     const req = triggerDemoIncomingRequest();
@@ -1173,11 +1259,16 @@ export default function Dashboard({ onLogout, initialOpenWithdraw = false }) {
   };
 
   const handleAcceptRequest = (req) => {
+    markChatRequestHandled(req && (req.sessionId || req._id || req.id));
     setIncomingRequest(null);
     setActiveChatSession(req);
   };
 
   const handleDeclineRequest = () => {
+    setIncomingRequest((prev) => {
+      if (prev) markChatRequestHandled(prev.sessionId || prev._id || prev.id);
+      return prev;
+    });
     setIncomingRequest(null);
   };
 

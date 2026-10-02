@@ -1,12 +1,15 @@
 import { io } from "socket.io-client";
 import { SOCKET_URL } from "../config/api";
+import { syncServerClock } from "./serverClock";
 
 let socket = null;
 let currentRoomSessionId = null;
 let heartbeatInterval = null;
+let sessionHeartbeatInterval = null;
 const listeners = {
   incomingRequest: [],
   incomingCallRequest: [],
+  incomingRequestCancelled: [],
   callAccepted: [],
   callRejected: [],
   callEnded: [],
@@ -16,9 +19,12 @@ const listeners = {
   walletWarning: [],
   userTyping: [],
   chatEnded: [],
+  // Session Engine (protocol 2)
+  sessionStarted: [],
+  billingPaused: [],
+  billingResumed: [],
+  peerState: [],
 };
-
-
 
 /**
  * Audio Synthesizer for incoming request alert (works without any external mp3 file)
@@ -84,11 +90,34 @@ export const extractUserData = (data) => {
     data.image ||
     "https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=120&auto=format&fit=crop&q=80";
 
-  const dob = userObj.dob || userObj.dateofbirth || userObj.dateOfBirth || userObj.birthDate || data.dob || data.dateofbirth || data.dateOfBirth || data.birthDate || "Not Specified";
-  const tob = userObj.tob || userObj.timeofbirth || userObj.timeOfBirth || userObj.birthTime || data.tob || data.timeofbirth || data.timeOfBirth || data.birthTime || "Not Specified";
-  const pob = userObj.pob || userObj.placeofbirth || userObj.placeOfBirth || userObj.birthPlace || data.pob || data.placeofbirth || data.placeOfBirth || data.birthPlace || "Not Specified";
-  const topic = userObj.topic || userObj.consultationTopic || data.topic || data.consultationTopic || data.subject || "Astrology Consultation";
-  const gender = userObj.gender || data.gender || "Not Specified";
+  let rawDob = userObj.dob || userObj.dateofbirth || userObj.dateOfBirth || userObj.birthDate || data.dob || data.dateofbirth || data.dateOfBirth || data.birthDate;
+  let dob = "Not Specified";
+  if (rawDob && typeof rawDob === "string" && rawDob.trim() && rawDob.trim() !== "Not Specified") {
+    dob = rawDob.trim();
+    if (/^\d{4}-\d{2}-\d{2}/.test(dob)) {
+      try {
+        const d = new Date(dob);
+        if (!isNaN(d.getTime())) {
+          const day = String(d.getDate()).padStart(2, '0');
+          const month = String(d.getMonth() + 1).padStart(2, '0');
+          const year = d.getFullYear();
+          dob = `${day}/${month}/${year}`;
+        }
+      } catch (e) {}
+    }
+  }
+
+  const rawTob = userObj.tob || userObj.timeofbirth || userObj.timeOfBirth || userObj.birthTime || data.tob || data.timeofbirth || data.timeOfBirth || data.birthTime;
+  const tob = (rawTob && typeof rawTob === "string" && rawTob.trim()) ? rawTob.trim() : "Not Specified";
+
+  const rawPob = userObj.pob || userObj.placeofbirth || userObj.placeOfBirth || userObj.birthPlace || (userObj.birthLocation && (userObj.birthLocation.name || userObj.birthLocation.city)) || data.pob || data.placeofbirth || data.placeOfBirth || data.birthPlace || (data.birthLocation && (data.birthLocation.name || data.birthLocation.city));
+  const pob = (rawPob && typeof rawPob === "string" && rawPob.trim()) ? rawPob.trim() : "Not Specified";
+
+  const rawTopic = userObj.topic || userObj.consultationTopic || data.topic || data.consultationTopic || data.subject;
+  const topic = (rawTopic && typeof rawTopic === "string" && rawTopic.trim()) ? rawTopic.trim() : "Astrology Consultation";
+
+  const rawGender = userObj.gender || data.gender;
+  const gender = (rawGender && typeof rawGender === "string" && rawGender.trim()) ? rawGender.trim() : "Not Specified";
 
   return {
     _id: userObj._id || userObj.id || userIdStr || data.userId || "",
@@ -192,12 +221,14 @@ export const connectSocket = () => {
       role: "astrologer",
       userId: astroId,
       astrologerId: astroId,
+      sessionProtocol: 2,
     },
     query: {
       token,
       role: "astrologer",
       userId: astroId,
       astrologerId: astroId,
+      sessionProtocol: 2,
     },
     reconnection: true,
     reconnectionAttempts: 15,
@@ -224,6 +255,11 @@ export const connectSocket = () => {
       }, 10000);
     }
 
+    // Server clock probe and, after a reconnect, ask the server for the authoritative session state
+    probeServerClock();
+    if (currentRoomSessionId) resumeLiveSession();
+    startSessionHeartbeat();
+
     if (currentRoomSessionId) {
       if (import.meta.env.DEV) {
         console.log("⚡ Auto re-joining active session room:", currentRoomSessionId);
@@ -236,31 +272,37 @@ export const connectSocket = () => {
     }
   });
 
-  // Catch-all listener to ensure NO backend event is ever dropped or missed
-  socket.onAny((eventName, data) => {
-    // console.log("🔥 [Socket Catch-All Event Received]:", eventName, data);
-    // If event name explicitly contains call/video/audio keywords (and not chat) and isn't already handled
-    const evtLower = String(eventName || "").toLowerCase();
-    // Exclude status, state, typing, ringing, and acknowledgment events from triggering the incoming call modal
-    const excludedKeywords = ["accepted", "ended", "rejected", "sent", "state", "ringing", "media", "peer", "typing", "presence", "heartbeat"];
-    const isExcluded = excludedKeywords.some(keyword => evtLower.includes(keyword));
-    if (
-      (evtLower.includes("call") || evtLower.includes("video") || evtLower.includes("audio")) &&
-      !evtLower.includes("chat") &&
-      !isExcluded
-    ) {
-      if (data && (data.callId || data.sessionId || data._id || data.id || data.user || data.data)) {
-        handleIncomingCall(data);
-      }
-    }
-  });
+  // NOTE: Removed onAny catch-all that was firing handleIncomingCall a second time
+  // for every call-related event already handled by explicit callRequestEvents listeners.
+
+  // Dedup sets: prevent same session from triggering multiple popups within 5 seconds
+  const recentlyHandledCallIds = new Set();
+  const recentlyHandledChatIds = new Set();
 
   // Incoming Chat Request Event Handler
   const handleIncoming = (data) => {
+    if (!data) return;
+    const sessionData = data.data || data.session || data;
+    const reqType = String(sessionData.requestType || sessionData.callType || data.requestType || data.callType || data.type || "").toUpperCase();
+    const msg = String(data.message || sessionData.message || "").toUpperCase();
+    if (reqType.includes("CALL") || reqType.includes("AUDIO") || reqType.includes("VIDEO") || msg.includes("CALL")) {
+      console.log("ℹ️ Ignored call request payload in handleIncoming (chat handler)");
+      return;
+    }
+
+    const validSessionId = sessionData.sessionId || sessionData._id || sessionData.id || data.sessionId || data._id || "";
+    // Deduplication: ignore if same chat session was already handled in the last 5s
+    if (validSessionId && recentlyHandledChatIds.has(validSessionId)) {
+      console.log("⚠️ Duplicate chat request ignored for session:", validSessionId);
+      return;
+    }
+    if (validSessionId) {
+      recentlyHandledChatIds.add(validSessionId);
+      setTimeout(() => recentlyHandledChatIds.delete(validSessionId), 5000);
+    }
+
     console.log("🔔 Incoming Chat Request received on socket:", data);
     
-    const sessionData = data.data || data.session || data;
-    const validSessionId = sessionData.sessionId || sessionData._id || sessionData.id || data.sessionId || data._id || "";
     const userDetails = extractUserData(data);
 
     const normalizedData = {
@@ -268,10 +310,13 @@ export const connectSocket = () => {
       _id: validSessionId,
       user: userDetails,
       perMinuteRate: Number(sessionData.perMinuteRate || data.perMinuteRate || data.rate || 10) || 10,
-      requestedAt: sessionData.createdAt || data.createdAt || new Date().toISOString()
+      requestedAt: sessionData.createdAt || data.createdAt || new Date().toISOString(),
+      // server-authoritative request deadline: the modal only displays a countdown to it
+      expiresAt: data.expiresAt || sessionData.expiresAt || null,
+      serverNow: data.serverNow || null
     };
+    syncServerClock(normalizedData.serverNow);
 
-    // playNotificationSound(); // Disabled old tung-tung chime in favor of 30s ringtone
     listeners.incomingRequest.forEach((fn) => fn(normalizedData));
   };
 
@@ -280,11 +325,8 @@ export const connectSocket = () => {
     "incoming_request",
     "chat_request",
     "new_chat_request",
-    "request_received",
     "user_chat_request",
-    "new_request",
-    "request_chat",
-    "initiate_chat"
+    "new_request"
   ];
 
   requestEvents.forEach((evt) => {
@@ -295,10 +337,21 @@ export const connectSocket = () => {
   // Incoming Call Request Event Handler (Audio / Video)
   const handleIncomingCall = (data) => {
     if (!data) return;
-    console.log("📞 Incoming Call Request received on socket:", data);
 
     const sessionObj = data.data || data.session || data.call || data;
     const validId = sessionObj.callSessionId || sessionObj.callId || sessionObj.sessionId || sessionObj._id || sessionObj.id || data.callSessionId || data.callId || data.sessionId || data._id || data.id || "";
+
+    // Deduplication: ignore if same session was handled in the last 5s
+    if (validId && recentlyHandledCallIds.has(validId)) {
+      console.log("⚠️ Duplicate call request ignored for session:", validId);
+      return;
+    }
+    if (validId) {
+      recentlyHandledCallIds.add(validId);
+      setTimeout(() => recentlyHandledCallIds.delete(validId), 5000);
+    }
+
+    console.log("📞 Incoming Call Request received on socket:", data);
 
     const userDetails = extractUserData(data);
     const rawType = String(sessionObj.callType || sessionObj.type || data.callType || data.type || "AUDIO").toUpperCase();
@@ -316,35 +369,27 @@ export const connectSocket = () => {
       rtcToken: sessionObj.rtcToken || sessionObj.token || data.rtcToken || data.token || agoraObj.token || "",
       appId: sessionObj.appId || data.appId || agoraObj.appId || "",
       agora: agoraObj,
-      requestedAt: sessionObj.createdAt || data.createdAt || new Date().toISOString()
+      requestedAt: sessionObj.createdAt || data.createdAt || new Date().toISOString(),
+      // server-authoritative request deadline: the modal only displays a countdown to it
+      expiresAt: data.expiresAt || sessionObj.expiresAt || null,
+      serverNow: data.serverNow || null
     };
+    syncServerClock(normalizedData.serverNow);
 
-    // playNotificationSound(); // Disabled old tung-tung chime in favor of 30s ringtone
     listeners.incomingCallRequest.forEach((fn) => fn(normalizedData));
   };
 
 
-  // Comprehensive array of all possible socket event names backend might emit when user requests call
+  // Explicit backend→astrologer notification events for incoming call/video call requests
   const callRequestEvents = [
     "incoming_call_request",
-    "user_request_call",
-    "request_call",
     "incoming_call",
-    "call_request",
     "new_call_request",
-    "call_incoming",
     "incoming_video_call",
     "incoming_audio_call",
     "video_call_request",
     "audio_call_request",
-    "call_received",
-    "new_video_session",
     "incoming_video_session",
-    "receive_call",
-    "call",
-    "video_session_request",
-    "initiate_call",
-    "call_initiated",
     "user_call_request"
   ];
   callRequestEvents.forEach((evt) => {
@@ -422,6 +467,7 @@ export const connectSocket = () => {
   // Timer Tick & Billing Update Event
   socket.on("timer_tick", (data) => {
     console.log("⏱️ Timer Tick:", data);
+    if (data) syncServerClock(data.serverNow);
     listeners.timerTick.forEach((fn) => fn(data));
   });
 
@@ -464,21 +510,92 @@ export const connectSocket = () => {
   socket.on("user_ended_chat", handleChatEnded);
   socket.on("chat_closed", handleChatEnded);
   socket.on("session_closed", handleChatEnded);
-  socket.on("user_left", handleChatEnded);
-  socket.on("leave_chat", handleChatEnded);
+  // Incoming Request Cancelled / Rejected Event
+  const handleIncomingCancelled = (data) => {
+    console.log("🚫 Incoming Request Cancelled / Rejected Event Received:", data);
+    listeners.incomingRequestCancelled.forEach((fn) => fn(data));
+    listeners.chatEnded.forEach((fn) => fn(data));
+    listeners.callEnded.forEach((fn) => fn(data));
+  };
 
-  socket.on("status_change", (data) => {
-    if (data && (data.status === "COMPLETED" || data.status === "ENDED" || data.status === "REJECTED" || data.status === "CLOSED")) {
-      handleChatEnded(data);
-    }
+  const cancelEvents = [
+    "incoming_request_cancelled",
+    "request_cancelled",
+    "chat_rejected",
+    "call_rejected",
+    "cancel_chat_request",
+    "cancel_call_request",
+    "cancel_request"
+  ];
+  cancelEvents.forEach((evt) => {
+    socket.on(evt, handleIncomingCancelled);
   });
 
-  socket.on("session_update", (data) => {
-    if (data && (data.status === "COMPLETED" || data.status === "ENDED" || data.status === "REJECTED" || data.status === "CLOSED")) {
-      handleChatEnded(data);
-    }
+  // ---------------------------------------------------------------------------------------
+  // Session Engine (protocol 2). Server events are mapped onto the listener keys the modals
+  // already use, so the same code serves legacy and protocol-2 sessions.
+  // ---------------------------------------------------------------------------------------
+
+  // A new request: the legacy events carry the same payload, so the existing 5s de-duplication applies
+  socket.on("session:incoming", (data) => {
+    if (!data) return;
+    if (String(data.type || data.callType || "").toUpperCase() === "CHAT") handleIncoming(data);
+    else handleIncomingCall(data);
   });
 
+  // Billing clock started: the server's startedAt is the ONLY start time (shared with the user)
+  socket.on("session:started", (data) => {
+    if (!data) return;
+    syncServerClock(data.serverNow);
+    const tick = { sessionId: data.sessionId, startTime: data.startedAt, startedAt: data.startedAt, serverNow: data.serverNow };
+    listeners.timerTick.forEach((fn) => fn(tick));
+    listeners.sessionStarted.forEach((fn) => fn(data));
+  });
+
+  socket.on("session:tick", (data) => {
+    if (!data) return;
+    syncServerClock(data.serverNow);
+    listeners.timerTick.forEach((fn) => fn(data));
+  });
+
+  socket.on("session:low_balance", (data) => listeners.walletWarning.forEach((fn) => fn(data)));
+  socket.on("session:billing_paused", (data) => listeners.billingPaused.forEach((fn) => fn(data)));
+  socket.on("session:billing_resumed", (data) => {
+    if (data) syncServerClock(data.serverNow);
+    if (data && data.startedAt) {
+      const tick = { sessionId: data.sessionId, startTime: data.startedAt, startedAt: data.startedAt, serverNow: data.serverNow };
+      listeners.timerTick.forEach((fn) => fn(tick));
+    }
+    listeners.billingResumed.forEach((fn) => fn(data));
+  });
+  // the existing (legacy) names for the same events
+  socket.on("billing_paused", (data) => listeners.billingPaused.forEach((fn) => fn(data)));
+  socket.on("billing_resumed", (data) => listeners.billingResumed.forEach((fn) => fn(data)));
+
+  // The user is reconnecting / is back (the session itself continues during the grace window)
+  socket.on("session:peer_reconnecting", (data) => listeners.peerState.forEach((fn) => fn({ ...data, state: "RECONNECTING" })));
+  socket.on("session:peer_reconnected", (data) => listeners.peerState.forEach((fn) => fn({ ...data, state: "CONNECTED" })));
+
+  // Request withdrawn before it started (cancelled by the user, missed, rejected)
+  ["session:cancelled", "session:missed", "session:rejected"].forEach((evt) => {
+    socket.on(evt, (data) => {
+      console.log(`🚫 ${evt}:`, data);
+      listeners.incomingRequestCancelled.forEach((fn) => fn(data));
+      listeners.chatEnded.forEach((fn) => fn(data));
+      listeners.callEnded.forEach((fn) => fn(data));
+    });
+  });
+
+  // The server's FINAL result: duration, price, earnings and platform fee are decided once, by the server
+  socket.on("session:ended", (data) => {
+    console.log("🔴 session:ended (final result from server):", data);
+    if (!data) return;
+    const mapped = mapFinalToLegacy(data);
+    listeners.chatEnded.forEach((fn) => fn(mapped));
+    listeners.callEnded.forEach((fn) => fn(mapped));
+    // acknowledge so a missed result is not re-delivered on reconnect
+    if (data.sessionId) emitAck("session:ack_final", { sessionId: data.sessionId }).catch(() => null);
+  });
 
   socket.on("disconnect", (reason) => {
     console.log("❌ Socket disconnected:", reason);
@@ -486,6 +603,83 @@ export const connectSocket = () => {
 
   return socket;
 };
+
+/** session:ended payload -> the session-document shape the modals' end handlers already read */
+const mapFinalToLegacy = (data) => ({
+  success: true,
+  ...data,
+  totalDurationSeconds: data.durationSeconds,
+  totalAmountDeducted: data.totalCost,
+  astrologerEarnings: data.earnings,
+  session: {
+    _id: data.sessionId,
+    status: data.status,
+    settled: data.settled,
+    totalDurationSeconds: data.durationSeconds,
+    totalAmountDeducted: data.totalCost,
+    astrologerEarnings: data.earnings,
+    platformFee: data.platformFee,
+  },
+});
+
+/** Acknowledged socket call with a timeout. Resolves { ok, ... } and never rejects on a slow server. */
+export const emitAck = (event, payload, timeoutMs = 4000) =>
+  new Promise((resolve) => {
+    const s = connectSocket();
+    if (!s || !s.connected) {
+      resolve({ ok: false, code: "NOT_CONNECTED", message: "Not connected to the server." });
+      return;
+    }
+    const timer = setTimeout(() => resolve({ ok: false, code: "TIMEOUT", message: "The server did not answer in time." }), timeoutMs);
+    s.emit(event, payload, (reply) => {
+      clearTimeout(timer);
+      resolve(reply || { ok: false, code: "NO_REPLY" });
+    });
+  });
+
+/** Learn the server clock offset (Cristian's algorithm: use the midpoint of the round trip). */
+const probeServerClock = async () => {
+  const t0 = Date.now();
+  const reply = await emitAck("time:sync", {});
+  if (reply && reply.serverNow) {
+    const rtt = Date.now() - t0;
+    syncServerClock(new Date(reply.serverNow).getTime() + rtt / 2);
+  }
+};
+
+/** After a reconnect: restore timer / final result from the server's authoritative state. */
+const resumeLiveSession = async () => {
+  const sessionId = currentRoomSessionId;
+  if (!sessionId) return;
+  const reply = await emitAck("session:resume", { sessionId });
+  if (!reply || !reply.ok || !reply.session) return;
+  const snap = reply.session;
+  syncServerClock(snap.serverNow);
+  if (snap.startedAt && (snap.status === "ACTIVE" || snap.status === "ENDING")) {
+    const tick = { sessionId, startTime: snap.startedAt, startedAt: snap.startedAt, serverNow: snap.serverNow };
+    listeners.timerTick.forEach((fn) => fn(tick));
+  }
+  if (snap.final && snap.status === "COMPLETED") {
+    // the end happened while we were offline: deliver the result now
+    const mapped = mapFinalToLegacy(snap.final);
+    listeners.chatEnded.forEach((fn) => fn(mapped));
+    listeners.callEnded.forEach((fn) => fn(mapped));
+    emitAck("session:ack_final", { sessionId }).catch(() => null);
+  }
+};
+
+/** Proof of life for the live session every 15s (used only if a server instance dies). */
+const startSessionHeartbeat = () => {
+  if (sessionHeartbeatInterval) clearInterval(sessionHeartbeatInterval);
+  sessionHeartbeatInterval = setInterval(() => {
+    if (socket && socket.connected && currentRoomSessionId) {
+      socket.emit("session:heartbeat", { sessionId: currentRoomSessionId }, () => {});
+    }
+  }, 15000);
+};
+
+/** Audio/video: tell the server this side has joined the media channel. Billing starts when both have. */
+export const reportMediaReady = (sessionId) => emitAck("session:media_ready", { sessionId });
 
 
 /**
@@ -641,15 +835,19 @@ export const endChatSession = (sessionId) => {
   const s = connectSocket();
   if (s) {
     const cleanId = String(sessionId);
-    const payload = { sessionId: cleanId, chatId: cleanId, _id: cleanId, id: cleanId };
+    const payload = { sessionId: cleanId, chatId: cleanId, callId: cleanId, _id: cleanId, id: cleanId };
 
     console.log("🔴 Emitting endChatSession via socket:", payload);
+    s.emit("end_chat_session", payload);
+    s.emit("end_call_session", payload);
     s.emit("end_chat", payload);
     s.emit("end_session", payload);
     s.emit("chat_ended", payload);
     s.emit("session_ended", payload);
     s.emit("leave_chat", payload);
 
+    s.emit("end_chat_session", cleanId);
+    s.emit("end_call_session", cleanId);
     s.emit("end_chat", cleanId);
     s.emit("end_session", cleanId);
     s.emit("chat_ended", cleanId);
@@ -726,12 +924,25 @@ export const rejectCallRequest = (callId, reason = "Astrologer is currently busy
  * End active call session
  */
 export const endCallSession = (callId) => {
+  currentRoomSessionId = null;
   const s = connectSocket();
   if (s) {
     const cleanId = String(callId);
+    const payload = { sessionId: cleanId, callId: cleanId, chatId: cleanId, _id: cleanId, id: cleanId };
     console.log("🔴 Emitting end_call_session via socket:", cleanId);
-    s.emit("end_call_session", { sessionId: cleanId, callId: cleanId });
-    s.emit("end_call", { sessionId: cleanId, callId: cleanId });
+    s.emit("end_call_session", payload);
+    s.emit("end_chat_session", payload);
+    s.emit("end_call", payload);
+    s.emit("end_session", payload);
+    s.emit("call_ended", payload);
+    s.emit("session_ended", payload);
+
+    s.emit("end_call_session", cleanId);
+    s.emit("end_chat_session", cleanId);
+    s.emit("end_call", cleanId);
+    s.emit("end_session", cleanId);
+    s.emit("call_ended", cleanId);
+    s.emit("session_ended", cleanId);
   }
 };
 

@@ -29,7 +29,7 @@ export const joinAgoraCallChannel = async ({
   callbacks = {}
 }) => {
   try {
-    const finalAppId = appId || import.meta.env.VITE_AGORA_APP_ID || "af89ac0f87f4412ea75f23aba4717e04";
+    const finalAppId = appId || import.meta.env.VITE_AGORA_APP_ID || "73a9632788114db7a6af55c96ea9e053";
     const numericUid = uid !== undefined && uid !== null ? Number(uid) : null;
     
     console.log(`[AGORA] init - type: ${callType}, channel: ${channelName}, uid: ${numericUid}, appId: ${finalAppId}`);

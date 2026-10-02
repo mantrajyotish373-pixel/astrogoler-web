@@ -3,9 +3,10 @@ import { Check, X, Clock, Calendar, MapPin, User, Sparkles, Phone, Video, Mic, S
 import { acceptCallApi, rejectCallApi } from "../config/api";
 import { acceptCallRequest, rejectCallRequest } from "../services/socket";
 import { startIncomingRingtone, stopRingtone, playConnectionChime } from "../services/sound";
+import { secondsUntil } from "../services/serverClock";
 
 export default function IncomingCallModal({ request, onAccept, onDecline }) {
-  const [timeLeft, setTimeLeft] = useState(30);
+  const [timeLeft, setTimeLeft] = useState(() => secondsUntil(request?.expiresAt) ?? 30);
   const [isProcessing, setIsProcessing] = useState(false);
   const [errorAlert, setErrorAlert] = useState(null);
 
@@ -17,6 +18,7 @@ export default function IncomingCallModal({ request, onAccept, onDecline }) {
 
   // Play 30-second Ringtone on Incoming Request (Only when Astrologer is ONLINE)
   useEffect(() => {
+    if (!callId) return;
     const isOnline = localStorage.getItem("astro_is_online");
     if (isOnline === "false") {
       console.log("Astrologer is OFFLINE: Ringtone sound suppressed.");
@@ -35,17 +37,25 @@ export default function IncomingCallModal({ request, onAccept, onDecline }) {
       audio.pause();
       audio.currentTime = 0;
     };
-  }, [request]);
+  }, [callId]);
 
+  // The request deadline is decided by the SERVER (expiresAt). This is only a display countdown to it;
+  // the client never decides to time out. At zero the card just closes: the server marks the request
+  // missed (and tells the user), so no API call is made from here.
   useEffect(() => {
-    if (timeLeft <= 0) {
-      handleDecline();
-      return;
-    }
     const timer = setInterval(() => {
-      setTimeLeft((prev) => prev - 1);
+      setTimeLeft((prev) => {
+        const fromServer = secondsUntil(request?.expiresAt);
+        return fromServer !== null ? fromServer : prev - 1;
+      });
     }, 1000);
     return () => clearInterval(timer);
+  }, [request?.expiresAt]);
+
+  useEffect(() => {
+    if (timeLeft <= 0 && !isProcessing) {
+      onDecline(callId);
+    }
   }, [timeLeft]);
 
   const handleAccept = async () => {
