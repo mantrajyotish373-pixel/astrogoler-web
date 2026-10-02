@@ -51,8 +51,11 @@ export const uploadImageApi = async (file) => {
 
     console.log("Uploading image to backend API:", API_ENDPOINTS.UPLOAD_IMAGE);
 
+    // Uploads require a signed-in user
+    const uploadToken = localStorage.getItem("astrologerToken") || localStorage.getItem("token") || "";
     const response = await fetch(API_ENDPOINTS.UPLOAD_IMAGE, {
       method: "POST",
+      headers: uploadToken ? { Authorization: `Bearer ${uploadToken}` } : {},
       body: formData,
     });
 
