@@ -488,10 +488,14 @@ export default function ActiveChatModal({ session, onClose }) {
 
   // Calculate exact pro-rata second-based gross charges (e.g. ₹9/min = ₹0.15/sec)
   const ratePerSecond = perMinuteRate / 60;
-  const currentExactGross = parseFloat((Math.max(1, secondsElapsed) * ratePerSecond).toFixed(2));
+  // Seconds the user pays from bonus money are a "free session": shown as time, never as rupees.
+  const promoCover = Number(session?.promoCoverSeconds || 0);
+  const currentExactGross = parseFloat((Math.max(0, Math.max(1, secondsElapsed) - promoCover) * ratePerSecond).toFixed(2));
   const totalAmt = Number(session?.totalAmountDeducted || 0);
+  const endedFree = isReadOnly && Number(session?.promoSeconds || 0) > 0 && !(Number(session?.astrologerEarnings || 0) > 0);
+  const isFreePhase = endedFree || (!isReadOnly && promoCover > 0 && secondsElapsed <= promoCover);
   const currentEarnings = isReadOnly && totalAmt > 0
-    ? totalAmt.toFixed(2)
+    ? (Number(session?.astrologerEarnings || 0) > 0 ? totalAmt.toFixed(2) : "0.00")
     : currentExactGross.toFixed(2);
   currentEarningsRef.current = currentEarnings;
 
@@ -544,9 +548,9 @@ export default function ActiveChatModal({ session, onClose }) {
                 <div className="flex flex-col items-start">
                   <div className="flex items-center gap-0.5 text-gray-800 text-[10px] font-medium leading-none">
                     <Wallet size={9} className="text-gray-400" />
-                    <span>₹{Number(currentEarnings).toFixed(2)}</span>
+                    <span>{isFreePhase ? "Free session" : `₹${Number(currentEarnings).toFixed(2)}`}</span>
                   </div>
-                  <span className="text-[6px] text-gray-400 font-bold uppercase mt-0.5 tracking-wide">Total Earned</span>
+                  <span className="text-[6px] text-gray-400 font-bold uppercase mt-0.5 tracking-wide">{isFreePhase ? "Bonus time" : "Total Earned"}</span>
                 </div>
               </div>
 

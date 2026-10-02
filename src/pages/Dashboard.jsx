@@ -1437,6 +1437,15 @@ export default function Dashboard({ onLogout, initialOpenWithdraw = false }) {
                 <span className="text-gray-500 font-medium">Duration</span>
                 <span className="font-bold text-gray-800">{summaryData.duration}</span>
               </div>
+              {Number(summaryData.promoSeconds || 0) > 0 && Number(summaryData.earnings || 0) <= 0 ? (
+                <div className="border-t border-gray-250 pt-3.5 space-y-2">
+                  <div className="flex justify-between items-center text-sm font-extrabold text-gray-900">
+                    <span>Free session time</span>
+                    <span className="text-sky-600 text-lg">{Math.floor(summaryData.promoSeconds / 60)}m {summaryData.promoSeconds % 60}s</span>
+                  </div>
+                  <p className="text-[11px] text-gray-400">This client used bonus credit, so no rupees are shown. The time is added to your free session time.</p>
+                </div>
+              ) : (
               <div className="border-t border-gray-250 pt-3.5 space-y-2">
                 <div className="flex justify-between items-center text-xs">
                   <span className="text-gray-500 font-medium">Total Charges (Gross)</span>
@@ -1450,7 +1459,14 @@ export default function Dashboard({ onLogout, initialOpenWithdraw = false }) {
                   <span>Your Earnings (60%)</span>
                   <span className="text-emerald-600 text-lg">₹{Number(summaryData.earnings || 0).toFixed(2)}</span>
                 </div>
+                {Number(summaryData.promoSeconds || 0) > 0 && (
+                  <div className="flex justify-between items-center text-xs pt-1">
+                    <span className="text-gray-500 font-medium">Plus free session time</span>
+                    <span className="font-bold text-sky-600">{Math.floor(summaryData.promoSeconds / 60)}m {summaryData.promoSeconds % 60}s</span>
+                  </div>
+                )}
               </div>
+              )}
             </div>
 
             <button

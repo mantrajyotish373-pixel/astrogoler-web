@@ -592,7 +592,10 @@ export default function ActiveCallModal({ session, onClose }) {
 
   // Compute exact pro-rata live earnings directly from the elapsed duration in seconds
   const ratePerSecond = perMinuteRate / 60;
-  const currentExactGross = parseFloat((Math.max(1, duration) * ratePerSecond).toFixed(2));
+  // Seconds the user pays from bonus money are a "free session": shown as time, never as rupees.
+  const promoCover = Number(session?.promoCoverSeconds || 0);
+  const currentExactGross = parseFloat((Math.max(0, Math.max(1, duration) - promoCover) * ratePerSecond).toFixed(2));
+  const isFreePhase = promoCover > 0 && duration <= promoCover;
   const currentEarnings = currentExactGross.toFixed(2);
   currentEarningsRef.current = currentEarnings;
 
@@ -619,7 +622,7 @@ export default function ActiveCallModal({ session, onClose }) {
           <span className="text-[#E28743] font-bold text-[13px]">₹{perMinuteRate}/min</span>
           <span className="text-white/15 font-light">|</span>
           <span className="bg-[#0c181a] border border-[#10b981]/40 text-[#10b981] px-3 py-0.5 rounded-full text-[11.5px] font-bold tabular-nums whitespace-nowrap">
-            Earning: +₹{currentEarnings}
+            {isFreePhase ? "Free session" : `Earning: +₹${currentEarnings}`}
           </span>
         </div>
 

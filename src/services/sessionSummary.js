@@ -31,7 +31,8 @@ export const extractServerFinal = (...payloads) => {
         seconds: Number(seconds),
         cost: Number(cost),
         earnings: o.earnings ?? o.astrologerEarnings,
-        platformFee: o.platformFee
+        platformFee: o.platformFee,
+        promoSeconds: Number(o.promoSeconds || 0)
       };
     }
   }
@@ -50,6 +51,7 @@ export const buildSessionSummary = ({ clientName, type, payloads = [], fallbackS
       totalDeducted: f.cost.toFixed(2),
       platformFee: platformFee.toFixed(2),
       earnings: earnings.toFixed(2),
+      promoSeconds: f.promoSeconds || 0,
       estimated: false
     };
   }

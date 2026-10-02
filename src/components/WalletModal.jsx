@@ -9,6 +9,7 @@ export default function WalletModal({ isOpen, onClose, initialWithdrawOpen = fal
   const [balance, setBalance] = useState(0);
   const [totalEarnings, setTotalEarnings] = useState(0);
   const [pendingPayout, setPendingPayout] = useState(0);
+  const [promoSeconds, setPromoSeconds] = useState(0);
   const [isWithdrawOpen, setIsWithdrawOpen] = useState(initialWithdrawOpen);
   const [amount, setAmount] = useState("");
   const [payoutMethod, setPayoutMethod] = useState("upi"); // "upi" | "bank"
@@ -50,6 +51,7 @@ export default function WalletModal({ isOpen, onClose, initialWithdrawOpen = fal
           setBalance(balData.data.walletBalance || 0);
           setTotalEarnings(balData.data.totalEarnings || 0);
           setPendingPayout(balData.data.pendingPayout || 0);
+          setPromoSeconds(balData.data.promoSecondsPending || 0);
         }
       }
 
@@ -64,7 +66,8 @@ export default function WalletModal({ isOpen, onClose, initialWithdrawOpen = fal
             date: tx.date || "Recent",
             method: tx.paymentMethod || tx.description || "Wallet Transaction",
             status: tx.status || "Completed",
-            type: tx.type || "debit"
+            type: tx.type || "debit",
+            promoSeconds: tx.promoSeconds || 0
           }));
           setTransactions(formatted);
         }
@@ -261,6 +264,12 @@ export default function WalletModal({ isOpen, onClose, initialWithdrawOpen = fal
                     <span className="text-indigo-200/70 block text-[10.5px]">Pending Payout</span>
                     <span className="font-bold text-amber-300 text-[13.5px]">₹ {pendingPayout.toLocaleString("en-IN")}</span>
                   </div>
+                  {promoSeconds > 0 && (
+                    <div className="col-span-2 pt-1">
+                      <span className="text-indigo-200/70 block text-[10.5px]">Free session time</span>
+                      <span className="font-bold text-sky-300 text-[13.5px]">{Math.floor(promoSeconds / 3600) > 0 ? `${Math.floor(promoSeconds / 3600)}h ` : ""}{Math.floor((promoSeconds % 3600) / 60)}m {promoSeconds % 60}s</span>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -303,7 +312,9 @@ export default function WalletModal({ isOpen, onClose, initialWithdrawOpen = fal
                     <div key={tx.id} className="bg-white rounded-2xl p-3.5 border border-gray-100 shadow-sm flex items-center justify-between hover:border-gray-200 transition-all">
                       <div className="flex items-center gap-3">
                         <div className={`w-10 h-10 rounded-2xl flex items-center justify-center flex-shrink-0 ${
-                          tx.type === "credit"
+                          tx.type === "free"
+                            ? "bg-sky-50 text-sky-600 border border-sky-100"
+                            : tx.type === "credit"
                             ? "bg-emerald-50 text-emerald-600 border border-emerald-100"
                             : tx.status === "Completed" 
                               ? "bg-emerald-50 text-emerald-600 border border-emerald-100" 
@@ -334,9 +345,15 @@ export default function WalletModal({ isOpen, onClose, initialWithdrawOpen = fal
                         </div>
                       </div>
                       <div className="text-right">
-                        <span className={`text-[14.5px] font-bold block ${tx.type === "credit" ? "text-emerald-600" : "text-gray-900"}`}>
-                          {tx.type === "credit" ? "+" : "-"} ₹ {tx.amount.toLocaleString("en-IN")}
-                        </span>
+                        {tx.type === "free" ? (
+                          <span className="text-[13.5px] font-bold block text-sky-600">
+                            {Math.floor(tx.promoSeconds / 60)}m {tx.promoSeconds % 60}s free
+                          </span>
+                        ) : (
+                          <span className={`text-[14.5px] font-bold block ${tx.type === "credit" ? "text-emerald-600" : "text-gray-900"}`}>
+                            {tx.type === "credit" ? "+" : "-"} ₹ {tx.amount.toLocaleString("en-IN")}
+                          </span>
+                        )}
                       </div>
                     </div>
                   ))
