@@ -1015,3 +1015,14 @@ export const fetchCallStateApi = async (sessionId) => {
     return null;
   }
 };
+
+// Followers of the logged-in astrologer: { total, followers: [{ id, name, profileImage, followedAt }] }
+export const fetchFollowersApi = async (limit = 100) => {
+  const token = localStorage.getItem("astrologerToken") || localStorage.getItem("token") || "";
+  const res = await fetch(`${BACKEND_URL}/api/follow/followers?limit=${limit}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || !json.success) throw new Error(json.message || "Could not load followers");
+  return json.data;
+};

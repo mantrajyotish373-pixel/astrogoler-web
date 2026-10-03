@@ -1,4 +1,7 @@
+import { useEffect, useState } from "react";
+import { fetchFollowersApi } from "../config/api";
 import {
+  Users,
   FileText,
   MessageSquare,
   Star,
@@ -12,6 +15,14 @@ import {
 import DashboardCard from "./DashboardCard";
 
 export default function DashboardGrid({ onCardClick }) {
+  const [followerCount, setFollowerCount] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    fetchFollowersApi(1).then((d) => { if (alive) setFollowerCount(d.total); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
   return (
     <div className="pt-2 pb-2">
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-6">
@@ -78,6 +89,16 @@ export default function DashboardGrid({ onCardClick }) {
           onClick={() => onCardClick("ratings")}
         />
 
+        {/* Followers Card */}
+        <DashboardCard
+          title="Followers"
+          subtitle="People following you"
+          badge={followerCount === null ? undefined : String(followerCount)}
+          badgeColor="bg-violet-100 text-violet-700"
+          icon={Users}
+          onClick={() => onCardClick("followers")}
+        />
+
         {/* Astrologer Profile Card */}
         <DashboardCard
           title="My Profile"
@@ -89,4 +110,4 @@ export default function DashboardGrid({ onCardClick }) {
       </div>
     </div>
   );
-}
+}

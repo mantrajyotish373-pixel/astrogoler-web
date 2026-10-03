@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { fetchCallStateApi, fetchActiveSessionApi, uploadImageApi, fetchChatHistoryApi, checkPendingRequestsApi, BACKEND_URL, checkPendingCallRequestsApi, fetchCallHistoryApi, updateAstroProfileApi } from "../config/api";
-import { ArrowLeft, ChevronDown, Mic, Video, MessageSquare, Radio, Mail, Phone, Briefcase, User, Mars, Sliders, Building, Compass, MapPin, Sparkles, LogOut, Camera, Loader2, Play, MessageCircle, CheckCircle, ShieldAlert } from "lucide-react";
+import { fetchFollowersApi, fetchCallStateApi, fetchActiveSessionApi, uploadImageApi, fetchChatHistoryApi, checkPendingRequestsApi, BACKEND_URL, checkPendingCallRequestsApi, fetchCallHistoryApi, updateAstroProfileApi } from "../config/api";
+import { Users, ArrowLeft, ChevronDown, Mic, Video, MessageSquare, Radio, Mail, Phone, Briefcase, User, Mars, Sliders, Building, Compass, MapPin, Sparkles, LogOut, Camera, Loader2, Play, MessageCircle, CheckCircle, ShieldAlert } from "lucide-react";
 import Header from "../components/Header";
 import DashboardGrid from "../components/DashboardGrid";
 import WalletModal from "../components/WalletModal";
@@ -242,6 +242,74 @@ function LiveChatView({ onBack, onSimulateDemo, onSelectChat }) {
   );
 }
 
+
+function FollowersView({ onBack }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    fetchFollowersApi(100)
+      .then((d) => { if (alive) setData(d); })
+      .catch((e) => { if (alive) setError(e.message || "Could not load followers"); });
+    return () => { alive = false; };
+  }, []);
+
+  const fmt = (iso) => new Date(iso).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+
+  return (
+    <div className="flex-1 flex flex-col h-full bg-gradient-to-b from-[#ff8f6c] to-[#ff5c33] overflow-hidden">
+      <div className="relative flex items-center justify-center px-6 pt-7 pb-5 text-white flex-shrink-0">
+        <button onClick={onBack} className="absolute left-6 hover:opacity-80 active:scale-95 transition-all cursor-pointer">
+          <ArrowLeft className="w-6 h-6" />
+        </button>
+        <h1 className="text-[21px] font-semibold text-center">Followers</h1>
+      </div>
+      <div className="bg-white rounded-t-[32px] flex-1 px-5 pt-6 pb-6 overflow-y-auto shadow-2xl">
+        <div className="flex items-center gap-5 p-5 rounded-[24px] bg-[#ff7448]/5 border border-[#ff7448]/10 mb-6">
+          <div className="w-14 h-14 rounded-2xl bg-white flex items-center justify-center shadow-sm">
+            <Users className="w-7 h-7 text-[#ff7448]" />
+          </div>
+          <div>
+            <div className="text-4xl font-extrabold text-[#ff7448]">{data ? data.total : "–"}</div>
+            <p className="text-sm text-gray-500 mt-0.5">people follow you. They are notified when you go live.</p>
+          </div>
+        </div>
+
+        {error ? (
+          <div className="text-center py-16 text-red-400 text-sm">{error}</div>
+        ) : !data ? (
+          <div className="flex justify-center items-center py-20">
+            <span className="w-10 h-10 border-4 border-orange-500 border-t-transparent rounded-full animate-spin"></span>
+          </div>
+        ) : data.followers.length === 0 ? (
+          <div className="text-center py-16 text-gray-400 text-sm">No followers yet. Users can follow you from your profile.</div>
+        ) : (
+          <div className="space-y-3">
+            {data.followers.map((f) => (
+              <div key={f.id} className="flex items-center gap-3 p-3 rounded-[20px] bg-gray-50 border border-gray-100">
+                {f.profileImage ? (
+                  <img src={f.profileImage} alt="" className="w-11 h-11 rounded-full object-cover bg-orange-50" />
+                ) : (
+                  <div className="w-11 h-11 rounded-full bg-orange-100 text-[#ff7448] font-bold flex items-center justify-center">
+                    {(f.name || "U").charAt(0).toUpperCase()}
+                  </div>
+                )}
+                <div className="flex-1 min-w-0">
+                  <p className="font-semibold text-gray-800 truncate">{f.name}</p>
+                  <span className="text-[11px] text-gray-400 font-medium">Followed on {fmt(f.followedAt)}</span>
+                </div>
+              </div>
+            ))}
+            {data.total > data.followers.length && (
+              <p className="text-center text-xs text-gray-400 pt-2">Showing your {data.followers.length} most recent followers.</p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function RatingsView({ onBack }) {
   const [reviews, setReviews] = useState([]);
@@ -1337,6 +1405,8 @@ export default function Dashboard({ onLogout, initialOpenWithdraw = false }) {
         );
       case "ratings":
         return <RatingsView onBack={() => setActiveView("grid")} />;
+      case "followers":
+        return <FollowersView onBack={() => setActiveView("grid")} />;
       case "call-history":
         return (
           <CallHistoryView 
